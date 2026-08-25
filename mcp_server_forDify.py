@@ -66,6 +66,98 @@ def list_reservations(
     finally:
         conn.close()
 
+@mcp.tool()
+def find_available_slots(
+    date: str,
+    duration_minutes: int,
+    business_start: str = "09:00",
+    business_end: str = "18:00",
+) -> dict:
+    """
+    特定の日に空いている時間帯を探す。
+
+    ユーザーが「空いてる時間ある?」と尋ねたら、暗算で予約の隙間を計算するのではなく
+    このツールを使うこと。今日基準の相対的な日付(明日、来週火曜日など)は
+    current_timeで確認した日付を基準に計算してから渡す。
+
+    Args:
+        date: 照会する日付, "YYYY-MM-DD" 形式
+        duration_minutes: 必要な最小時間(分)。指定がなければ30を使う。
+        business_start: 探索開始時刻, "HH:MM" 形式 (デフォルト 09:00)
+        business_end: 探索終了時刻, "HH:MM" 形式 (デフォルト 18:00)
+
+    Returns:
+        {"success": true, "date": ..., "available_slots": [{"start":"HH:MM","end":"HH:MM","duration_minutes":N}, ...]}
+        available_slots が空配列なら、その条件を満たす空き時間がないという意味。
+    """
+    conn = _get_conn()
+    try:
+        return db.find_available_slots(conn, date, duration_minutes, business_start, business_end)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def count_reservations(
+    date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    category: Optional[str] = None,
+) -> dict:
+    """
+    予約件数を集計する。
+
+    ユーザーが「今月会議何件?」「来週の予約いくつ?」のように件数を尋ねたら、
+    list_reservationsで数を数えるのではなく、このツールで直接集計すること。
+
+    Args:
+        date: 特定の一日だけ集計, "YYYY-MM-DD"
+        start_date, end_date: 期間集計, "YYYY-MM-DD"
+        category: 特定のカテゴリだけ集計 ("接客"/"面接"/"会議"/"自由")
+
+    Returns:
+        {"success": true, "total": N, "by_category": {"会議": N, "接客": N, ...}}
+    """
+    conn = _get_conn()
+    try:
+        return db.count_reservations(conn, date=date, start_date=start_date, end_date=end_date, category=category)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_statistics(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    category: Optional[str] = None,
+) -> dict:
+    """
+    予約データの詳細統計をまとめて取得する。「グラフで見せて」「傾向を教えて」
+    「一番忙しい曜日は?」のような、単純な件数以上の分析が必要なときに使う
+    (単純な件数だけなら count_reservations で十分)。
+
+    Args:
+        start_date, end_date: 集計期間, "YYYY-MM-DD"。両方省略すると全期間。
+        category: 特定のカテゴリだけに絞りたい場合
+
+    Returns:
+        {
+          "success": true, "total": N,
+          "by_category": {"会議": N, ...},              カテゴリ別件数 → 円グラフ/棒グラフ向き
+          "by_category_percent": {"会議": 45.5, ...},    カテゴリ別割合(%)
+          "by_weekday": {"月": N, "火": N, ...},          曜日別件数 → 棒グラフ向き
+          "by_hour": {"09:00": N, "10:00": N, ...},       開始時刻の時間帯別件数 → ピーク時間帯の把握、棒グラフ向き
+          "daily_counts": {"2026-08-24": N, ...},         日別件数の推移 → 折れ線グラフ向き
+          "average_duration_minutes": N                    平均所要時間(分)
+        }
+    """
+    conn = _get_conn()
+    try:
+        return db.get_statistics(conn, start_date=start_date, end_date=end_date, category=category)
+    finally:
+        conn.close()
+
+
 # @mcp.tool()
 # def list_rooms() -> dict:
 #     """
