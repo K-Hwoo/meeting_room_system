@@ -1,15 +1,4 @@
--- PRAGMA foreign_keys = ON;
-
--- ------------------------------------------------
--- rooms: 会議室のリスト
--- ------------------------------------------------
-
--- CREATE TABLE IF NOT EXISTS rooms (
---     id          INTEGER PRIMARY KEY AUTOINCREMENT,
---     name        TEXT NOT NULL,        -- 会議室の名
---     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
--- );
-
+PRAGMA foreign_keys = ON;
 
 -- ------------------------------------------------
 -- employees: 社員情報
@@ -29,7 +18,6 @@ CREATE TABLE IF NOT EXISTS employees (
 
 CREATE TABLE IF NOT EXISTS reservations (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    -- room_id      INTEGER NOT NULL,    -- 会議室
     title        TEXT NOT NULL,       -- 予定のタイトル
     start_time   DATETIME NOT NULL,   -- 開始時間
     end_time     DATETIME NOT NULL,   -- 終了時間
@@ -37,11 +25,8 @@ CREATE TABLE IF NOT EXISTS reservations (
     description  TEXT,                -- 簡単な説明
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
  
-    -- FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
- 
     -- 終了時間が開始時間より早くなる誤入力を防止
-    CHECK (end_time > start_time),
-    -- 実は、CRUDはClaudeがしてくれるので、いらないかもしれない。   
+    CHECK (end_time > start_time), 
  
     -- カテゴリーは下の４つの値だけ許容(判断はClaudeが行う)
     CHECK (category IN ('会議', '接客', '面接', '自由'))
@@ -69,45 +54,25 @@ CREATE TABLE IF NOT EXISTS reservation_participants (
 );
 
 
--- ------------------------------------------------
--- 会議室1室登録
--- ------------------------------------------------
--- INSERT INTO rooms (name)
--- SELECT 'Meeting_Room_101'
--- WHERE NOT EXISTS (SELECT 1 FROM rooms);
+-- ============================================================
+-- Index
+-- ============================================================
 
--- ------------------------------------------------
--- 社員データ
--- ------------------------------------------------
+-- 社員名で検索するためのIndex
+CREATE INDEX IF NOT EXISTS idx_employees_name
+ON employees(name);
 
-INSERT OR IGNORE INTO employees (name, email)
-VALUES
-    ('田中太郎', 'tanaka@example.com'),
-    ('山田花子', 'yamada@example.com'),
-    ('佐藤健', 'sato@example.com');
+-- 社員から参加している会議を検索するためのIndex
+CREATE INDEX IF NOT EXISTS idx_participants_employee
+ON reservation_participants(employee_id);
 
+-- 会議から参加者を検索するためのIndex
+CREATE INDEX IF NOT EXISTS idx_participants_reservation
+ON reservation_participants(reservation_id);
 
--- ------------------------------------------------
--- 予約データ
--- ------------------------------------------------
-
-INSERT INTO reservations
-    (title, start_time, end_time, category, description)
-VALUES
-    (
-        'プロジェクト進捗会議',
-        '2026-08-27 10:00:00',
-        '2026-08-27 11:00:00',
-        '会議',
-        'プロジェクトの進捗確認と今後のスケジュールについて話し合う'
-    ),
-    (
-        '採用面接',
-        '2026-08-27 14:00:00',
-        '2026-08-27 15:00:00',
-        '面接',
-        'エンジニア候補者との面接'
-    );
+-- 会議の時間から検索するためのIndex
+CREATE INDEX IF NOT EXISTS idx_reservations_start_time
+ON reservations(start_time);
 
 
 -- ------------------------------------------------
@@ -147,3 +112,42 @@ WHERE r.title = '採用面接'
       'tanaka@example.com',
       'yamada@example.com'
   );
+
+
+-- ============================================================
+-- Verification
+-- ============================================================
+
+-- 직원 목록 확인
+SELECT
+    id,
+    name,
+    email
+FROM employees
+ORDER BY id;
+
+
+-- 예약 목록 확인
+SELECT
+    id,
+    title,
+    start_time,
+    end_time,
+    category,
+    description
+FROM reservations
+ORDER BY start_time;
+
+
+-- 예약 참가자 확인
+SELECT
+    r.title AS meeting_title,
+    r.start_time,
+    e.name AS participant_name,
+    e.email AS participant_email
+FROM reservation_participants rp
+JOIN reservations r
+    ON rp.reservation_id = r.id
+JOIN employees e
+    ON rp.employee_id = e.id
+ORDER BY r.start_time, e.id;

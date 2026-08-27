@@ -385,52 +385,6 @@ def find_available_slots(
 
 
 # ------------------------------------------------
-# 予約件数の集計
-# ------------------------------------------------
-def count_reservations(
-    conn: sqlite3.Connection,
-    date: str = None,
-    start_date: str = None,
-    end_date: str = None,
-    category: str = None,
-) -> dict:
-    """
-    条件に合う予約件数を数える。パラメータの意味は list_reservations と同じ。
-    全体件数(total)とカテゴリ別件数(by_category)を一緒に返す。
-    """
-    query = "SELECT category, COUNT(*) as cnt FROM reservations WHERE 1=1"
-    params = []
-
-    if date is not None:
-        query += " AND date(start_time) <= date(?) AND date(end_time) >= date(?)"
-        params.extend([date, date])
-    elif start_date is not None or end_date is not None:
-        range_start = start_date if start_date is not None else end_date
-        range_end = end_date if end_date is not None else start_date
-        query += " AND date(start_time) <= date(?) AND date(end_time) >= date(?)"
-        params.extend([range_end, range_start])
-
-    if category is not None:
-        if category not in VALID_CATEGORIES:
-            return {
-                "success": False,
-                "error": "invalid_category",
-                "valid_categories": VALID_CATEGORIES,
-                "given": category,
-            }
-        query += " AND category = ?"
-        params.append(category)
-
-    query += " GROUP BY category"
-    rows = conn.execute(query, params).fetchall()
-
-    by_category = {r["category"]: r["cnt"] for r in rows}
-    total = sum(by_category.values())
-
-    return {"success": True, "total": total, "by_category": by_category}
-
-
-# ------------------------------------------------
 # 詳細統計（グラフ化しやすい形式）
 # ------------------------------------------------
 def get_statistics(
@@ -525,4 +479,149 @@ def get_statistics(
         "by_hour": dict(sorted(by_hour.items())),
         "daily_counts": dict(sorted(daily_counts.items())),
         "average_duration_minutes": round(total_duration / total, 1),
+    }
+    
+    
+def get_employee_meetings(conn, employee_name: str) -> dict:
+
+    cursor = conn.execute(
+        """
+        SELECT id, name, email
+        FROM employees
+        WHERE name LIKE '%' || ? || '%'
+        ORDER BY id
+        """,
+        (employee_name,)
+    )
+
+    employees = cursor.fetchall()
+
+    if not employees:
+        return {
+            "success": False,
+            "error": "EMPLOYEE_NOT_FOUND",
+            "message": f"「{employee_name}」という社員が見つかりませんでした。"
+        }
+
+    if len(employees) > 1:
+        return {
+            "success": False,
+            "error": "MULTIPLE_EMPLOYEES",
+            "employees": [
+                {
+                    "id": employee["id"],
+                    "name": employee["name"],
+                    "email": employee["email"]
+                }
+                for employee in employees
+            ]
+        }
+
+    employee = employees[0]
+
+    cursor = conn.execute(
+        """
+        SELECT
+            r.id,
+            r.title,
+            r.start_time,
+            r.end_time,
+            r.category,
+            r.description
+        FROM reservations r
+        INNER JOIN reservation_participants rp
+            ON r.id = rp.reservation_id
+        WHERE rp.employee_id = ?
+        ORDER BY r.start_time
+        """,
+        (employee["id"],)
+    )
+
+    reservations = cursor.fetchall()
+
+    return {
+        "success": True,
+        "employee": {
+            "id": employee["id"],
+            "name": employee["name"],
+            "email": employee["email"]
+        },
+        "reservations": [
+            {
+                "id": reservation["id"],
+                "title": reservation["title"],
+                "start_time": reservation["start_time"],
+                "end_time": reservation["end_time"],
+                "category": reservation["category"],
+                "description": reservation["description"]
+            }
+            for reservation in reservations
+        ]
+    }
+    
+def get_reservation_participants(conn, reservation_id: int) -> dict:
+    """
+    指定された予約に参加する社員情報を取得する。
+    """
+
+    # ------------------------------------------------
+    # 1. 指定された会議が実際に存在するか確認
+    # ------------------------------------------------
+
+    cursor = conn.execute(
+        """
+        SELECT id, title, start_time, end_time
+        FROM reservations
+        WHERE id = ?
+        """,
+        (reservation_id,)
+    )
+
+    reservation = cursor.fetchone()
+
+    if reservation is None:
+        return {
+            "success": False,
+            "error": "RESERVATION_NOT_FOUND",
+            "message": f"予約ID {reservation_id} が見つかりませんでした。"
+        }
+
+    # ------------------------------------------------
+    # 2. 参加者照会
+    # ------------------------------------------------
+
+    cursor = conn.execute(
+        """
+        SELECT e.id, e.name, e.email
+        FROM employees e
+        INNER JOIN reservation_participants rp
+            ON e.id = rp.employee_id
+        WHERE rp.reservation_id = ?
+        ORDER BY e.id
+        """,
+        (reservation_id,)
+    )
+
+    participants = cursor.fetchall()
+
+    # ------------------------------------------------
+    # 3. 戻り値
+    # ------------------------------------------------
+
+    return {
+        "success": True,
+        "reservation": {
+            "id": reservation["id"],
+            "title": reservation["title"],
+            "start_time": reservation["start_time"],
+            "end_time": reservation["end_time"]
+        },
+        "participants": [
+            {
+                "id": participant["id"],
+                "name": participant["name"],
+                "email": participant["email"]
+            }
+            for participant in participants
+        ]
     }

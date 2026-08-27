@@ -16,7 +16,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DB_PATH = os.environ.get(
     "MEETING_ROOM_DB_PATH",
-    os.path.join(_SCRIPT_DIR, "meeting_room.db"),
+    os.path.join(_SCRIPT_DIR, "meeting_room_dummy.db"),
 )
 PORT = int(os.environ.get("PORT", "8001"))
 
@@ -27,7 +27,6 @@ def _get_conn():
 
 @mcp.tool()
 def list_reservations(
-    # room_id: Optional[int] = None,
     date: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -98,34 +97,6 @@ def find_available_slots(
 
 
 @mcp.tool()
-def count_reservations(
-    date: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    category: Optional[str] = None,
-) -> dict:
-    """
-    予約件数を集計する。
-
-    ユーザーが「今月会議何件?」「来週の予約いくつ?」のように件数を尋ねたら、
-    list_reservationsで数を数えるのではなく、このツールで直接集計すること。
-
-    Args:
-        date: 特定の一日だけ集計, "YYYY-MM-DD"
-        start_date, end_date: 期間集計, "YYYY-MM-DD"
-        category: 特定のカテゴリだけ集計 ("接客"/"面接"/"会議"/"自由")
-
-    Returns:
-        {"success": true, "total": N, "by_category": {"会議": N, "接客": N, ...}}
-    """
-    conn = _get_conn()
-    try:
-        return db.count_reservations(conn, date=date, start_date=start_date, end_date=end_date, category=category)
-    finally:
-        conn.close()
-
-
-@mcp.tool()
 def get_statistics(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -157,21 +128,45 @@ def get_statistics(
     finally:
         conn.close()
 
+@mcp.tool()
+def get_employee_meetings(employee_name: str) -> dict:
+    """
+    指定された社員が参加する会議予定を取得する。
 
-# @mcp.tool()
-# def list_rooms() -> dict:
-#     """
-#     登録された会議室のリストを取得する。
+    社員名を指定すると、その社員が参加する予約と、
+    各予約の参加者情報を取得する。
 
-#     Returns:
-#         {"success": true, "rooms": [{"id":1,"name":"...","created_at":"..."}, ...]}
-#     """
-    
-#     conn = _get_conn()
-#     try:
-#         return db.list_rooms(conn)
-#     finally:
-#         conn.close()
+    Args:
+        employee_name:
+            検索する社員名。
+    """
+
+    conn = _get_conn()
+
+    try:
+        return db.get_employee_meetings(conn, employee_name=employee_name)
+    finally:
+        conn.close()
+        
+@mcp.tool()
+def get_reservation_participants(reservation_id: int) -> dict:
+    """
+    指定された予約の参加社員を取得する。
+
+    予約IDを指定すると、その会議に参加する
+    社員の名前とメールアドレスを返す。
+
+    Args:
+        reservation_id:
+            参加者を取得したい予約のID。
+    """
+
+    conn = _get_conn()
+
+    try:
+        return db.get_reservation_participants(conn, reservation_id=reservation_id)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
