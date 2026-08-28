@@ -166,99 +166,6 @@ def add_reservation(
         return {"success": False, "error": "db_constraint_failed", "detail": str(e)}
  
  
-def update_reservation(conn: sqlite3.Connection, reservation_id: int, **fields) -> dict:
-    # 入力されていないフィールドは既存の値を保持
-    existing_row = conn.execute(
-        "SELECT * FROM reservations WHERE id = ?", (reservation_id,)
-    ).fetchone()
-
-    if existing_row is None:
-        return {"success": False, "error": "reservation_not_found", "reservation_id": reservation_id}
- 
-    existing = _row_to_dict(existing_row)
- 
-    allowed = ["title", "start_time", "end_time", "category", "description"]
-    updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
- 
-    new_title = updates.get("title", existing["title"])
-    new_start = updates.get("start_time", existing["start_time"])
-    new_end = updates.get("end_time", existing["end_time"])
-    new_category = updates.get("category", existing["category"])
-    new_description = updates.get("description", existing["description"])
- 
-    if "category" in updates and new_category not in VALID_CATEGORIES:
-        return {
-            "success": False,
-            "error": "invalid_category",
-            "valid_categories": VALID_CATEGORIES,
-            "given": new_category,
-        }
- 
-    if "start_time" in updates:
-        norm_start = _parse_datetime(new_start)
-        if norm_start is None:
-            return {
-                "success": False,
-                "error": "invalid_datetime_format",
-                "expected_formats": DATETIME_FORMATS,
-                "given": {"start_time": new_start},
-            }
-    else:
-        norm_start = new_start
- 
-    if "end_time" in updates:
-        norm_end = _parse_datetime(new_end)
-        if norm_end is None:
-            return {
-                "success": False,
-                "error": "invalid_datetime_format",
-                "expected_formats": DATETIME_FORMATS,
-                "given": {"end_time": new_end},
-            }
-    else:
-        norm_end = new_end
- 
-    if norm_start >= norm_end:
-        return {
-            "success": False,
-            "error": "end_before_start",
-            "start_time": norm_start,
-            "end_time": norm_end,
-        }
-
-    # 重ねる予約確認（自身は除外）
-    overlapping = _find_overlapping(conn, norm_start, norm_end, exclude_id=reservation_id)
-    if overlapping:
-        return {"success": False, "error": "time_overlap", "conflicts": overlapping}
- 
-    try:
-        conn.execute(
-            """
-            UPDATE reservations
-            SET title = ?, start_time = ?, end_time = ?, category = ?, description = ?
-            WHERE id = ?
-            """,
-            (new_title, norm_start, norm_end, new_category, new_description, reservation_id),
-        )
-        conn.commit()
-        
-        row = conn.execute("SELECT * FROM reservations WHERE id = ?", (reservation_id,)).fetchone()
-        return {"success": True, "reservation": _row_to_dict(row)}
-    
-    except sqlite3.IntegrityError as e:
-        return {"success": False, "error": "db_constraint_failed", "detail": str(e)}
- 
-
-def delete_reservation(conn: sqlite3.Connection, reservation_id: int) -> dict:
-    row = conn.execute("SELECT * FROM reservations WHERE id = ?", (reservation_id,)).fetchone()
-    if row is None:
-        return {"success": False, "error": "reservation_not_found", "reservation_id": reservation_id}
- 
-    conn.execute("DELETE FROM reservations WHERE id = ?", (reservation_id,))
-    conn.commit()
-    return {"success": True, "deleted": _row_to_dict(row)}
- 
- 
 def list_reservations(
     conn: sqlite3.Connection,
     date: str = None,
@@ -482,42 +389,8 @@ def get_statistics(
     }
     
     
-def get_employee_meetings(conn, employee_name: str) -> dict:
-
-    cursor = conn.execute(
-        """
-        SELECT id, name, email
-        FROM employees
-        WHERE name LIKE '%' || ? || '%'
-        ORDER BY id
-        """,
-        (employee_name,)
-    )
-
-    employees = cursor.fetchall()
-
-    if not employees:
-        return {
-            "success": False,
-            "error": "EMPLOYEE_NOT_FOUND",
-            "message": f"「{employee_name}」という社員が見つかりませんでした。"
-        }
-
-    if len(employees) > 1:
-        return {
-            "success": False,
-            "error": "MULTIPLE_EMPLOYEES",
-            "employees": [
-                {
-                    "id": employee["id"],
-                    "name": employee["name"],
-                    "email": employee["email"]
-                }
-                for employee in employees
-            ]
-        }
-
-    employee = employees[0]
+def get_employee_reservations(conn, email: str) -> dict:
+    """メールアドレスから、その社員が参加する予定を取得する。"""
 
     cursor = conn.execute(
         """
@@ -525,103 +398,77 @@ def get_employee_meetings(conn, employee_name: str) -> dict:
             r.id,
             r.title,
             r.start_time,
-            r.end_time,
-            r.category,
-            r.description
+            r.end_time
         FROM reservations r
-        INNER JOIN reservation_participants rp
-            ON r.id = rp.reservation_id
-        WHERE rp.employee_id = ?
-        ORDER BY r.start_time
+        JOIN reservation_participants rp
+          ON rp.reservation_id = r.id
+        JOIN employees e
+          ON e.id = rp.employee_id
+        WHERE LOWER(e.email) = LOWER(?)
+        ORDER BY r.start_time, r.id
         """,
-        (employee["id"],)
+        (email.strip(),)
     )
 
     reservations = cursor.fetchall()
 
+    if not reservations:
+        return {
+            "success": False,
+            "error": "NO_RESERVATIONS_FOUND",
+            "message": "該当する社員、または参加予定が見つかりませんでした。"
+        }
+
     return {
         "success": True,
+        "reservations": [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "start_time": r["start_time"],
+                "end_time": r["end_time"],
+            }
+            for r in reservations
+        ]
+    }
+
+
+# ------------------------------------------------
+# 社員認証
+# ------------------------------------------------
+def authenticate_employee(conn, email: str) -> dict:
+    """
+    メールアドレスで本人確認を行う(完全一致のみ)。
+
+    Returns:
+        成功: {"authenticated": true,
+               "employee": {"id":N,"name":..,"email":..,"is_admin":bool}}
+        失敗: {"authenticated": false,
+               "employee": {"id": null, "name": "UNKNOWN", "email": <入力値>, "is_admin": false}}
+    """
+    
+    cursor = conn.execute(
+        "SELECT id, name, email, is_admin FROM employees WHERE email = ?",
+        (email,),
+    )
+    employee = cursor.fetchone()
+
+    if employee is None:
+        return {
+            "authenticated": False,
+            "employee": {
+                "id": None, 
+                "name": "Error: EMPLOYEE_NOT_FOUND", 
+                "email": email, 
+                "is_admin": False},
+        }
+
+    return {
+        "authenticated": True,
         "employee": {
             "id": employee["id"],
             "name": employee["name"],
-            "email": employee["email"]
+            "email": employee["email"],
+            "is_admin": bool(employee["is_admin"]),
         },
-        "reservations": [
-            {
-                "id": reservation["id"],
-                "title": reservation["title"],
-                "start_time": reservation["start_time"],
-                "end_time": reservation["end_time"],
-                "category": reservation["category"],
-                "description": reservation["description"]
-            }
-            for reservation in reservations
-        ]
-    }
-    
-def get_reservation_participants(conn, reservation_id: int) -> dict:
-    """
-    指定された予約に参加する社員情報を取得する。
-    """
-
-    # ------------------------------------------------
-    # 1. 指定された会議が実際に存在するか確認
-    # ------------------------------------------------
-
-    cursor = conn.execute(
-        """
-        SELECT id, title, start_time, end_time
-        FROM reservations
-        WHERE id = ?
-        """,
-        (reservation_id,)
-    )
-
-    reservation = cursor.fetchone()
-
-    if reservation is None:
-        return {
-            "success": False,
-            "error": "RESERVATION_NOT_FOUND",
-            "message": f"予約ID {reservation_id} が見つかりませんでした。"
-        }
-
-    # ------------------------------------------------
-    # 2. 参加者照会
-    # ------------------------------------------------
-
-    cursor = conn.execute(
-        """
-        SELECT e.id, e.name, e.email
-        FROM employees e
-        INNER JOIN reservation_participants rp
-            ON e.id = rp.employee_id
-        WHERE rp.reservation_id = ?
-        ORDER BY e.id
-        """,
-        (reservation_id,)
-    )
-
-    participants = cursor.fetchall()
-
-    # ------------------------------------------------
-    # 3. 戻り値
-    # ------------------------------------------------
-
-    return {
-        "success": True,
-        "reservation": {
-            "id": reservation["id"],
-            "title": reservation["title"],
-            "start_time": reservation["start_time"],
-            "end_time": reservation["end_time"]
-        },
-        "participants": [
-            {
-                "id": participant["id"],
-                "name": participant["name"],
-                "email": participant["email"]
-            }
-            for participant in participants
-        ]
     }

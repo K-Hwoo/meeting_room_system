@@ -8,12 +8,13 @@ CREATE TABLE IF NOT EXISTS employees (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,              -- 名前
     email       TEXT NOT NULL UNIQUE,       -- メールアドレス
+    is_admin    INTEGER NOT NULL DEFAULT 0,
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 
 -- ------------------------------------------------
--- reservations: 予約リスト
+-- reservations: 会議室の予約リスト
 -- ------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS reservations (
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS reservations (
     end_time     DATETIME NOT NULL,   -- 終了時間
     category     TEXT NOT NULL,       -- カテゴリー
     description  TEXT,                -- 簡単な説明
+    google_calendar_event_id  TEXT,   -- Googleカレンダーに探しやすいにするため
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
  
     -- 終了時間が開始時間より早くなる誤入力を防止
@@ -75,50 +77,10 @@ CREATE INDEX IF NOT EXISTS idx_reservations_start_time
 ON reservations(start_time);
 
 
--- ------------------------------------------------
--- 予約と参加社員の関連
--- ------------------------------------------------
-
--- プロジェクト進捗会議
--- 参加者: 田中太郎、山田花子、佐藤健
-
-INSERT INTO reservation_participants
-    (reservation_id, employee_id)
-SELECT
-    r.id,
-    e.id
-FROM reservations r
-CROSS JOIN employees e
-WHERE r.title = 'プロジェクト進捗会議'
-  AND e.email IN (
-      'tanaka@example.com',
-      'yamada@example.com',
-      'sato@example.com'
-  );
-
-
--- 採用面接
--- 参加者: 田中太郎、山田花子
-
-INSERT INTO reservation_participants
-    (reservation_id, employee_id)
-SELECT
-    r.id,
-    e.id
-FROM reservations r
-CROSS JOIN employees e
-WHERE r.title = '採用面接'
-  AND e.email IN (
-      'tanaka@example.com',
-      'yamada@example.com'
-  );
-
-
 -- ============================================================
 -- Verification
 -- ============================================================
 
--- 직원 목록 확인
 SELECT
     id,
     name,
@@ -126,8 +88,6 @@ SELECT
 FROM employees
 ORDER BY id;
 
-
--- 예약 목록 확인
 SELECT
     id,
     title,
@@ -138,8 +98,6 @@ SELECT
 FROM reservations
 ORDER BY start_time;
 
-
--- 예약 참가자 확인
 SELECT
     r.title AS meeting_title,
     r.start_time,
