@@ -55,6 +55,25 @@ CREATE TABLE IF NOT EXISTS reservation_participants (
         ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS reservation_requests (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    title           TEXT NOT NULL,
+    start_time      DATETIME NOT NULL,
+    end_time        DATETIME NOT NULL,
+    category        TEXT NOT NULL,
+    description     TEXT,
+    requester_email TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    reject_reason   TEXT,
+    reservation_id  INTEGER,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (reservation_id) REFERENCES reservations(id) ON DELETE SET NULL,
+    CHECK (end_time > start_time),
+    CHECK (category IN ('会議', '接客', '面接', '自由')),
+    CHECK (status IN ('pending', 'approved', 'rejected'))
+);
+CREATE INDEX IF NOT EXISTS idx_requests_status ON reservation_requests(status);
 
 -- ============================================================
 -- Index

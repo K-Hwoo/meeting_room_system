@@ -77,7 +77,7 @@ def _find_overlapping(conn, start_time, end_time, exclude_id=None) -> list:
           AND end_time > ?
 
     """
-    params = [start_time, end_time] 
+    params = [end_time, start_time]
     
     if exclude_id is not None:
         query += " AND id != ?"
@@ -472,3 +472,266 @@ def authenticate_employee(conn, email: str) -> dict:
             "is_admin": bool(employee["is_admin"]),
         },
     }
+    
+# ------------------------------------------------
+# Googleカレンダー連携用
+# ------------------------------------------------
+def set_calendar_event_id(conn, reservation_id: int, event_id: str) -> dict:
+    """予約にGoogleカレンダーのイベントIDを紐付けて保存する。"""
+    conn.execute(
+        "UPDATE reservations SET google_calendar_event_id = ? WHERE id = ?",
+        (event_id, reservation_id),
+    )
+    conn.commit()
+    return {"success": True, "reservation_id": reservation_id, "event_id": event_id}
+
+
+# ------------------------------------------------
+# 予約参加者
+# ------------------------------------------------
+def add_participants(conn, reservation_id: int, names: list) -> dict:
+    """
+    予約に参加者を追加する。
+    指定された社員名から employees の ID を取得し、
+    reservation_participants に reservation_id と employee_id を登録する。
+    """
+
+    added = []
+    not_found = []
+
+    for name in names:
+        row = conn.execute(
+            """
+            SELECT id, name, email
+            FROM employees
+            WHERE name = ?
+            """,
+            (name,),
+        ).fetchone()
+
+        if row is None:
+            not_found.append(name)
+            continue
+
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO reservation_participants
+            (reservation_id, employee_id)
+            VALUES (?, ?)
+            """,
+            (reservation_id, row["id"]),
+        )
+
+        added.append({
+            "id": row["id"],
+            "name": row["name"],
+            "email": row["email"],
+        })
+
+    conn.commit()
+
+    return {
+        "success": True,
+        "added": added,
+        "not_found": not_found,
+    }
+
+
+def get_reservation_participants(conn, reservation_id: int) -> dict:
+    """指定された予約の参加者一覧(名前・メール)を取得する。"""
+    rows = conn.execute(
+        """
+        SELECT e.id, e.name, e.email
+        FROM reservation_participants rp
+        JOIN employees e ON e.id = rp.employee_id
+        WHERE rp.reservation_id = ?
+        ORDER BY e.id
+        """,
+        (reservation_id,),
+    ).fetchall()
+
+    return {
+        "success": True,
+        "participants": [{"id": r["id"], "name": r["name"], "email": r["email"]} for r in rows],
+    }
+
+
+# ------------------------------------------------
+# 予約リクエスト(承認待ち) - 一般社員用
+# ------------------------------------------------
+def create_reservation_request(
+    conn,
+    title: str,
+    start_time: str,
+    end_time: str,
+    category: str,
+    requester_email: str,
+    description: str = None,
+) -> dict:
+    """
+    一般社員が予約をリクエストする。実際の reservations には書き込まず、
+    reservation_requests に status='pending' として記録するだけ。
+    管理者が approve_reservation_request を実行して初めて実際の予約になる。
+
+    Returns:
+        成功: {"success": true, "request": {...}, "conflict_warning": bool}
+             conflict_warning が true の場合、その時間帯に既存の予約と重複がある
+             (リクエスト自体はブロックしないが、管理者が承認時に再確認できるよう警告)
+        失敗: {"success": false, "error": "エラーコード", ...}
+    """
+    missing = []
+    if not title:
+        missing.append("title")
+    if not start_time:
+        missing.append("start_time")
+    if not end_time:
+        missing.append("end_time")
+    if not category:
+        missing.append("category")
+    if not requester_email:
+        missing.append("requester_email")
+    if missing:
+        return {"success": False, "error": "missing_fields", "missing_fields": missing}
+
+    if category not in VALID_CATEGORIES:
+        return {
+            "success": False,
+            "error": "invalid_category",
+            "valid_categories": VALID_CATEGORIES,
+            "given": category,
+        }
+
+    norm_start = _parse_datetime(start_time)
+    norm_end = _parse_datetime(end_time)
+    if norm_start is None or norm_end is None:
+        return {
+            "success": False,
+            "error": "invalid_datetime_format",
+            "expected_formats": DATETIME_FORMATS,
+            "given": {"start_time": start_time, "end_time": end_time},
+        }
+
+    if norm_start >= norm_end:
+        return {
+            "success": False,
+            "error": "end_before_start",
+            "start_time": norm_start,
+            "end_time": norm_end,
+        }
+
+    # 既存予約との重複は参考情報として確認するのみ(ブロックしない)
+    conflicts = _find_overlapping(conn, norm_start, norm_end)
+
+    cur = conn.execute(
+        """
+        INSERT INTO reservation_requests
+            (title, start_time, end_time, category, description, requester_email, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        """,
+        (title, norm_start, norm_end, category, description, requester_email),
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    row = conn.execute("SELECT * FROM reservation_requests WHERE id = ?", (new_id,)).fetchone()
+
+    return {
+        "success": True,
+        "request": _row_to_dict(row),
+        "conflict_warning": bool(conflicts),
+    }
+
+
+def list_reservation_requests(conn, status: str = None) -> dict:
+    """
+    予約リクエスト一覧を取得する。
+    status: "pending" | "approved" | "rejected"。省略すると全件。
+    """
+    valid_statuses = ["pending", "approved", "rejected"]
+    if status is not None and status not in valid_statuses:
+        return {
+            "success": False,
+            "error": "invalid_status",
+            "valid_statuses": valid_statuses,
+            "given": status,
+        }
+
+    if status is not None:
+        rows = conn.execute(
+            "SELECT * FROM reservation_requests WHERE status = ? ORDER BY created_at",
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM reservation_requests ORDER BY created_at"
+        ).fetchall()
+
+    return {"success": True, "requests": [_row_to_dict(r) for r in rows]}
+
+
+def approve_reservation_request(conn, request_id: int) -> dict:
+    """
+    保留中のリクエストを承認し、実際の予約を作成する。
+    承認時点で改めて重複チェックを行い、他の予約と衝突していれば失敗する
+    (リクエスト自体は pending のまま残るので、後で再判断できる)。
+
+    注意: Googleカレンダー連携はこの関数の呼び出し側(mcp_server.py)で
+          add_reservation相当の処理をしたあとに行うこと。この関数自体は
+          DBへの反映のみを担当する。
+    """
+    row = conn.execute("SELECT * FROM reservation_requests WHERE id = ?", (request_id,)).fetchone()
+    if row is None:
+        return {"success": False, "error": "request_not_found", "request_id": request_id}
+
+    req = _row_to_dict(row)
+    if req["status"] != "pending":
+        return {"success": False, "error": "already_processed", "current_status": req["status"]}
+
+    result = add_reservation(
+        conn,
+        req["title"],
+        req["start_time"],
+        req["end_time"],
+        req["category"],
+        req["description"],
+    )
+    if not result["success"]:
+        # 承認時点で重複等が発生した場合、リクエストは pending のまま維持
+        return {"success": False, "error": "approve_failed", "reason": result}
+
+    new_reservation_id = result["reservation"]["id"]
+    conn.execute(
+        """
+        UPDATE reservation_requests
+        SET status = 'approved', reservation_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (new_reservation_id, request_id),
+    )
+    conn.commit()
+    updated_row = conn.execute("SELECT * FROM reservation_requests WHERE id = ?", (request_id,)).fetchone()
+
+    return {"success": True, "request": _row_to_dict(updated_row), "reservation": result["reservation"]}
+
+
+def reject_reservation_request(conn, request_id: int, reason: str = None) -> dict:
+    """保留中のリクエストを却下する。実際の予約は作成しない。"""
+    row = conn.execute("SELECT * FROM reservation_requests WHERE id = ?", (request_id,)).fetchone()
+    if row is None:
+        return {"success": False, "error": "request_not_found", "request_id": request_id}
+
+    req = _row_to_dict(row)
+    if req["status"] != "pending":
+        return {"success": False, "error": "already_processed", "current_status": req["status"]}
+
+    conn.execute(
+        """
+        UPDATE reservation_requests
+        SET status = 'rejected', reject_reason = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (reason, request_id),
+    )
+    conn.commit()
+    updated_row = conn.execute("SELECT * FROM reservation_requests WHERE id = ?", (request_id,)).fetchone()
+
+    return {"success": True, "request": _row_to_dict(updated_row)}
