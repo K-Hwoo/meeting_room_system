@@ -1,132 +1,96 @@
 # Meeting Room System
 
-MCP(Model Context Protocol) 기반의 회의실 예약 관리 서버입니다. 직원 인증, 회의실 예약 및 조회, 예약 요청 승인 프로세스, 예약 가능 시간 검색, 통계 조회를 제공하며 Google Calendar와 선택적으로 연동할 수 있습니다.
+Dify와 MCP 클라이언트에서 사용할 수 있는 회의실 예약 서버입니다. 자연어로 예약을 조회하거나 예약 요청을 만들 수 있고, 관리자는 요청을 승인하거나 거절할 수 있습니다. 확정된 예약은 설정에 따라 Google Calendar에도 함께 등록됩니다.
 
-## 목차
+이 프로젝트는 사내 회의실 예약 과정을 AI 에이전트와 연결해보는 것을 목표로 만들었습니다. 데이터는 SQLite에 저장하므로 별도의 DB 서버 없이 실행할 수 있습니다.
 
-- [개요](#개요)
-- [전체적인 기능](#전체적인-기능)
-- [플로우차트](#플로우차트)
-- [실행법](#실행법)
-- [세부 기능](#세부-기능)
-- [영상](#영상)
-- [프로젝트 구조](#프로젝트-구조)
-- [운영 시 참고사항](#운영-시-참고사항)
+## 주요 기능
 
-## 개요
-
-회의실 예약 업무를 MCP 도구로 표준화해 AI 에이전트 또는 MCP 클라이언트에서 사용할 수 있도록 만든 백엔드 시스템입니다.
-
-- **관리자 모드**: MCP Inspector 등에서 직접 예약을 관리하는 `stdio` 서버
-- **Dify 모드**: Dify 에이전트에 연결할 수 있는 `SSE` 서버
-- **저장소**: 별도 DB 서버 없이 사용할 수 있는 SQLite
-- **외부 연동**: 서비스 계정 기반 Google Calendar 이벤트 생성
-
-예약 시간은 `YYYY-MM-DD HH:MM` 형식을 사용하며, 예약 카테고리는 `회의`, `접객`, `면접`, `자유` 중 하나입니다.
-
-## 전체적인 기능
-
-### 직원 및 예약 관리
-
-- 이메일 완전 일치 기반 직원 인증
+- 이메일을 이용한 직원 확인
 - 날짜, 기간, 카테고리별 예약 조회
-- 예약 생성 시 필수값, 날짜 형식, 종료 시간, 시간 중복 검증
-- 예약 참가자 연결 및 직원별 참여 예약 조회
-
-### 사용자 편의 기능
-
-- 지정한 날짜와 시간 조건에 맞는 빈 시간대 검색
-- 기간 및 카테고리별 예약 통계 제공
+- 회의실 예약 생성 및 중복 시간 검사
+- 예약별 참가자 저장과 직원별 일정 조회
+- 업무 시간 내 빈 시간 검색
+- 카테고리, 요일, 시간대별 이용 통계
 - 일반 직원의 예약 요청 등록
+- 관리자의 예약 요청 승인 및 거절
+- Google Calendar 선택 연동
 
-### 관리자 승인 기능
+## 동작 흐름
 
-- 대기 중인 예약 요청 목록 조회
-- 예약 요청 승인 또는 반려
-- 승인 시 실제 예약 생성, 참가자 연결, Google Calendar 동기화
-- 승인 시점의 시간 중복 재검증
-
-## 플로우차트
+현재 흐름은 크게 사용자용 Dify 에이전트와 관리자용 MCP 도구로 나뉩니다. Dify 워크플로의 세부 분기는 추후 실제 YAML 구성을 기준으로 보완할 예정입니다.
 
 ```mermaid
-flowchart TD
-	A[사용자 또는 관리자 요청] --> B{MCP 모드}
-	B -->|Dify| C[직원 인증]
-	B -->|Admin| D[관리자 도구 호출]
-
-	C --> E{요청 종류}
-	E -->|예약 조회/빈 시간/통계| F[SQLite 조회]
-	E -->|예약 요청| G[예약 요청 검증]
-	G --> H[reservation_requests에 pending 저장]
-	H --> I[관리자 검토]
-
-	D --> J{직접 예약 또는 요청 처리}
-	J -->|직접 예약| K[예약 데이터 검증]
-	J -->|승인| L[승인 시점 중복 재검증]
-	J -->|반려| M[반려 사유와 상태 저장]
-
-	K --> N{중복 여부}
-	N -->|중복 없음| O[reservations 저장]
-	N -->|중복 있음| P[오류 반환]
-	L --> N
-	O --> Q[참가자 연결]
-	Q --> R{Google Calendar 설정}
-	R -->|설정됨| S[Calendar 이벤트 생성]
-	R -->|미설정 또는 실패| T[예약은 유지하고 동기화 상태 반환]
-	S --> U[처리 결과 반환]
-	T --> U
-	F --> U
-	M --> U
+flowchart LR
+    U[사용자] --> D[Dify Agent]
+    D --> M[MCP Server]
+    A[관리자] --> M
+    M --> S[예약 서비스]
+    S --> DB[(SQLite)]
+    S -. 설정된 경우 .-> G[Google Calendar]
 ```
 
-## 실행법
+일반 직원이 만든 요청은 바로 예약으로 확정되지 않습니다. 먼저 `pending` 상태로 저장되고, 관리자가 승인해야 실제 예약이 생성됩니다. 승인 시점에 이미 다른 예약이 생겼다면 다시 중복 검사를 수행하고 요청을 대기 상태로 남깁니다.
 
-### 1. 사전 요구사항
+## 사용 기술
 
+- Python
+- FastMCP
+- SQLite
+- Dify
+- Google Calendar API
+
+## 프로젝트 구조
+
+```text
+meeting_room_system/
+├─ mcp_server.py
+├─ run_mcp.ps1
+├─ database/
+│  ├─ database_setting.sql
+│  └─ meeting_room.db
+├─ services/
+│  ├─ authentication.py
+│  ├─ crud_service.py
+│  ├─ find_service.py
+│  ├─ request_service.py
+│  ├─ save_info_service.py
+│  └─ utilize_service.py
+├─ utils/
+│  ├─ database.py
+│  ├─ format_tools.py
+│  ├─ google_calendar.py
+│  └─ server_setting.py
+└─ readme.md
+```
+
+`services`에는 예약과 요청을 처리하는 로직이 있고, `utils`에는 DB 연결, 날짜 변환, Google Calendar 연동 코드가 들어 있습니다. `mcp_server.py`는 이 기능들을 MCP 도구로 공개합니다.
+
+## 실행 준비
+
+### 요구 사항
+
+- Python 3.10 이상
 - Windows PowerShell
-- Python 3.10 이상 권장
-- Dify 연동 시 MCP를 지원하는 Dify 환경
-- Google Calendar 연동 시 Google Cloud 서비스 계정과 Calendar API 설정
+- Dify 연동 시 MCP를 사용할 수 있는 Dify 환경
+- Google Calendar 연동 시 Google Cloud 서비스 계정
 
-### 2. 가상환경 준비
+### 가상환경과 패키지 설치
 
-프로젝트 루트에서 실행합니다.
+프로젝트 폴더에서 다음 명령을 실행합니다.
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+python -m venv mcp
+.\mcp\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install fastmcp google-api-python-client google-auth
 ```
 
-현재 프로젝트에 포함된 `mcp` 가상환경을 사용하는 경우에는 새 환경을 만들지 않고 다음처럼 활성화할 수 있습니다.
+이미 `mcp` 가상환경을 구성했다면 활성화 명령만 실행하면 됩니다.
 
-```powershell
-.\mcp\Scripts\Activate.ps1
-```
+## 서버 실행
 
-### 3. 환경변수 설정
-
-#### 기본 설정
-
-```powershell
-$env:MCP_MODE = "dify"
-$env:PORT = "8001"
-```
-
-`MCP_MODE`는 `admin` 또는 `dify`로 설정합니다.
-
-| 변수                          | 기본값                     | 설명                              |
-| ----------------------------- | -------------------------- | --------------------------------- |
-| `MCP_MODE`                    | `admin`                    | `admin`: stdio, `dify`: SSE       |
-| `PORT`                        | `8001`                     | Dify 모드의 SSE 포트              |
-| `MEETING_ROOM_DB_PATH`        | `database/meeting_room.db` | SQLite 파일 경로                  |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | 없음                       | Google 서비스 계정 JSON 파일 경로 |
-| `GOOGLE_CALENDAR_ID`          | 없음                       | 동기화 대상 Google Calendar ID    |
-
-### 4. 서버 실행
-
-#### Dify 연동 모드
+### Dify 모드
 
 ```powershell
 $env:MCP_MODE = "dify"
@@ -134,102 +98,98 @@ $env:PORT = "8001"
 python .\mcp_server.py
 ```
 
-서버는 `http://localhost:8001`에서 SSE transport로 실행됩니다. 실제 Dify 연결 주소는 사용하는 Dify/MCP 커넥터의 SSE 엔드포인트 규칙에 맞춰 설정합니다.
-
-#### 관리자 모드
-
-```powershell
-$env:MCP_MODE = "admin"
-python .\mcp_server.py
-```
-
-관리자 모드는 `stdio` transport를 사용합니다. MCP Inspector로 확인하려면 별도 PowerShell 창에서 다음 명령을 실행합니다.
-
-```powershell
-npx @modelcontextprotocol/inspector
-```
-
-#### 제공된 실행 스크립트 사용
-
-`run_mcp.ps1`는 Dify 모드, 포트, Google Calendar 관련 환경변수를 설정한 뒤 서버를 실행합니다.
+Dify 모드는 SSE 방식으로 실행됩니다. 저장해둔 설정을 이용하려면 다음 스크립트를 사용할 수 있습니다.
 
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
 .\run_mcp.ps1
 ```
 
-### 5. 데이터베이스 초기화
+### 관리자 모드
 
-서버 시작 시 `database/meeting_room.db`가 없으면 `database/database_setting.sql`을 이용해 자동 생성합니다. 별도의 마이그레이션 명령은 필요하지 않습니다.
-
-## 세부 기능
-
-### MCP 도구
-
-| 도구                              | 사용 모드    | 설명                                                    |
-| --------------------------------- | ------------ | ------------------------------------------------------- |
-| `authenticate_employee`           | Dify         | 이메일로 직원 인증                                      |
-| `list_reservations_with_date`     | Admin / Dify | 특정 날짜, 기간, 카테고리의 예약 조회                   |
-| `add_reservation`                 | Admin / Dify | 중복 검증 후 예약 직접 생성                             |
-| `find_available_slots`            | Dify         | 업무 시간 내 예약 가능한 시간대 검색                    |
-| `get_statistics`                  | Dify         | 카테고리, 요일, 시간, 일자별 통계와 평균 이용 시간 조회 |
-| `list_reservations_with_employee` | Admin / Dify | 직원 이메일 기준 참여 예약 조회                         |
-| `create_reservation_request`      | Dify         | 일반 직원 예약 요청을 `pending` 상태로 저장             |
-| `list_reservation_requests`       | Admin / Dify | 예약 요청을 상태별로 조회                               |
-| `approve_reservation_request`     | Admin / Dify | 요청 승인 및 실제 예약 생성                             |
-| `reject_reservation_request`      | Admin / Dify | 요청 반려 및 사유 저장                                  |
-
-### 예약 요청 상태
-
-1. 일반 직원이 예약 요청을 등록하면 실제 예약이 아니라 `pending` 요청으로 저장됩니다.
-2. 관리자가 요청을 조회하고 승인하면 실제 예약과 참가자 정보가 생성됩니다.
-3. 승인 시점에 시간 중복을 다시 검사합니다. 중복이면 요청은 `pending` 상태로 유지됩니다.
-4. 반려하면 실제 예약은 생성되지 않고 `rejected` 상태와 반려 사유가 저장됩니다.
-
-### Google Calendar 동기화
-
-Google Calendar 설정이 완료된 경우 직접 예약 또는 예약 요청 승인 시 이벤트를 생성합니다. Calendar 설정이 없거나 동기화에 실패해도 SQLite 예약 데이터는 유지되며, 응답의 `calendar_sync` 값으로 결과를 확인할 수 있습니다.
-
-- `success`: 이벤트 생성 성공
-- `not_configured`: Calendar 환경변수 미설정
-- `failed`: 외부 API 호출 실패
-
-## 영상
-
-서비스 사용 흐름과 실행 화면을 아래 위치에 추가할 예정입니다.
-
-> **Demo 영상**: `docs/demo.mp4` 또는 저장소에 업로드한 YouTube 링크를 여기에 삽입하세요.
->
-> 예시: `[Demo 영상 보기](https://youtu.be/VIDEO_ID)`
-
-## 프로젝트 구조
-
-```text
-meeting_room_system/
-├─ mcp_server.py                 # FastMCP 서버와 도구 등록
-├─ run_mcp.ps1                   # Dify 모드 실행 스크립트
-├─ calendar_credentials.json     # Google 서비스 계정 인증 파일
-├─ database/
-│  └─ database_setting.sql       # SQLite 초기 스키마
-├─ services/                     # 인증, 예약, 요청, 조회, 통계 로직
-├─ utils/                        # DB, 날짜 형식, Google Calendar 유틸리티
-└─ readme.md
+```powershell
+$env:MCP_MODE = "admin"
+python .\mcp_server.py
 ```
 
-## 운영 시 참고사항
+관리자 모드는 표준 입출력 방식으로 실행됩니다. MCP Inspector를 사용하면 각 도구의 입력값과 반환값을 직접 확인할 수 있습니다.
 
-- `calendar_credentials.json`과 같은 인증 파일은 공개 저장소에 커밋하지 마세요. 배포 환경의 비밀 저장소 또는 환경변수로 관리하는 것을 권장합니다.
-- `MEETING_ROOM_DB_PATH`를 지정하지 않으면 서버 디렉터리 아래 `database/meeting_room.db`에 데이터가 저장됩니다.
-- 예약 시간은 시작 시간이 종료 시간보다 빠르고, 기존 예약과 겹치지 않아야 합니다.
-- 현재 예약 삭제 및 수정 함수는 구현되어 있지 않으므로, 운영 배포 전 필요한 관리자 기능인지 확인하세요.
-- Dify에 연결하기 전 로컬에서 MCP Inspector로 각 도구의 입력과 응답을 점검하는 것을 권장합니다.
-
-## 라이선스
-
-라이선스가 결정되면 이 섹션에 프로젝트 라이선스를 추가하세요.
-
-cd C:\경로\회의실폴더 $env:MCP_MODE="dify" $env:PORT="8001" python mcp_server.py
-
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
-
+```powershell
 npx @modelcontextprotocol/inspector
+```
+
+## 환경변수
+
+| 이름 | 기본값 | 설명 |
+| --- | --- | --- |
+| `MCP_MODE` | `admin` | `admin` 또는 `dify` |
+| `PORT` | `8001` | Dify 모드에서 사용할 포트 |
+| `MEETING_ROOM_DB_PATH` | `database/meeting_room.db` | SQLite DB 파일 경로 |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | 없음 | Google 서비스 계정 JSON 파일 경로 |
+| `GOOGLE_CALENDAR_ID` | 없음 | 연동할 Google Calendar ID |
+
+DB 파일이 없으면 서버 시작 시 `database/database_setting.sql`을 사용해 새로 생성합니다.
+
+## 제공하는 MCP 도구
+
+| 도구 | 모드 | 역할 |
+| --- | --- | --- |
+| `authenticate_employee` | Dify | 이메일로 직원 확인 |
+| `list_reservations_with_date` | Admin / Dify | 날짜, 기간, 카테고리별 예약 조회 |
+| `add_reservation` | Admin / Dify | 예약을 바로 생성 |
+| `find_available_slots` | Dify | 지정한 날짜의 빈 시간 조회 |
+| `get_statistics` | Dify | 예약 이용 통계 조회 |
+| `list_reservations_with_employee` | Admin / Dify | 직원별 참여 일정 조회 |
+| `create_reservation_request` | Dify | 예약 요청을 대기 상태로 등록 |
+| `list_reservation_requests` | Admin / Dify | 예약 요청 목록 조회 |
+| `approve_reservation_request` | Admin / Dify | 요청 승인 및 실제 예약 생성 |
+| `reject_reservation_request` | Admin / Dify | 요청 거절 및 사유 저장 |
+
+예약 시간은 `YYYY-MM-DD HH:MM` 형식으로 전달합니다. 카테고리는 코드와 DB에서 사용하는 다음 값 중 하나여야 합니다.
+
+```text
+会議 / 接客 / 面接 / 自由
+```
+
+직접 예약과 예약 요청 모두 참가자 목록이 필요합니다. 참가자는 `employees` 테이블에 등록된 이름으로 전달하며, 실제 예약에는 해당 직원의 ID 목록이 JSON 형태로 저장됩니다.
+
+## 예약 요청 상태
+
+- `pending`: 관리자 확인 전
+- `approved`: 승인되어 실제 예약이 생성된 상태
+- `rejected`: 거절된 상태
+
+승인 과정에서 시간 중복이 발견되면 실제 예약은 생성되지 않으며 요청은 `pending` 상태를 유지합니다.
+
+## Google Calendar 연동
+
+서비스 계정 파일과 Calendar ID가 설정되어 있으면 직접 예약 또는 요청 승인 시 Calendar 이벤트가 생성됩니다.
+
+Calendar 설정이 없거나 외부 API 호출에 실패하더라도 SQLite에 생성된 예약은 유지됩니다. 동기화 결과는 응답의 `calendar_sync` 값으로 확인할 수 있습니다.
+
+- `success`: Calendar 등록 성공
+- `not_configured`: 연동 정보가 설정되지 않음
+- `failed`: API 호출 실패
+
+## 테스트
+
+현재 테스트 DB에는 연속 예약, 서로 다른 이용 시간, 카테고리별 예약, 승인·거절·충돌 요청 등 MCP 동작을 확인하기 위한 데이터가 들어 있습니다.
+
+특히 다음 흐름을 확인할 수 있습니다.
+
+- 시간이 맞닿은 예약이 충돌 없이 생성되는지
+- 시간이 겹친 요청의 승인이 차단되는지
+- 승인된 요청이 실제 예약과 참가자 정보로 연결되는지
+- 거절된 요청에 사유가 남는지
+- 날짜·직원·카테고리 조회와 통계가 정상인지
+
+## 참고 사항
+
+- `calendar_credentials.json`은 인증 정보이므로 Git에 커밋하지 않습니다.
+- 운영 환경에서는 인증 파일과 Calendar ID를 비밀값으로 관리하는 것이 좋습니다.
+- 현재 예약 수정과 삭제 기능은 구현되어 있지 않습니다.
+- Dify 에이전트의 상세 동작과 대화 흐름은 Dify 워크플로 YAML 정리 후 이 문서에 추가할 예정입니다.
+
+## Demo
+
+Dify 에이전트와 관리자 승인 과정을 확인할 수 있는 실행 영상은 추후 추가할 예정입니다.
