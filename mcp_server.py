@@ -1,12 +1,17 @@
 import os
 import sys
 import sqlite3
-from typing import Optional
 
+from typing import Optional, List
 from fastmcp import FastMCP
 
-import db_logic as db
-import google_calendar
+import services.authentication as auth
+import services.crud_service as crud
+import services.request_service as rs
+import services.utilize_service as us
+import services.find_service as fs
+
+from utils.database import get_connection
 
 # "admin" または "dify"
 MODE = os.environ.get("MCP_MODE", "admin")
@@ -17,11 +22,11 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Databaseパス設定
 DB_PATH = os.environ.get(
     "MEETING_ROOM_DB_PATH",
-    os.path.join(_SCRIPT_DIR, "meeting_room.db"),
+    os.path.join(_SCRIPT_DIR, "database", "meeting_room.db"),
 )
 
 # 初期化SQLファイルのパス設定
-SQL_INIT_PATH = os.path.join(_SCRIPT_DIR, "database_setting.sql")
+SQL_INIT_PATH = os.path.join(_SCRIPT_DIR, "database", "database_setting.sql")
 
 # PORT設定
 PORT = int(os.environ.get("PORT", "8001"))
@@ -37,7 +42,9 @@ def _init_db_if_needed():
     with open(SQL_INIT_PATH, "r", encoding="utf-8") as f:
         sql_script = f.read()
 
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+    
     try:
         conn.executescript(sql_script)
         conn.commit()
@@ -51,7 +58,7 @@ mcp = FastMCP("meeting-room-server")
 
 
 def _get_conn() -> sqlite3.Connection:
-    return db.get_connection(DB_PATH)
+    return get_connection(DB_PATH)
 
 def tool_for(*modes):
     """
@@ -68,6 +75,7 @@ def tool_for(*modes):
 @tool_for("dify")
 def authenticate_employee(email: str) -> dict:
     """
+    【社員認証】
     メールアドレスで本人確認を行う(完全一致のみ)。
 
     Args:
@@ -75,83 +83,7 @@ def authenticate_employee(email: str) -> dict:
     """
     conn = _get_conn()
     try:
-        return db.authenticate_employee(conn, email)
-    finally:
-        conn.close()
-
-
-@tool_for("admin", "dify")
-def add_reservation(
-    title: str,
-    start_time: str,
-    end_time: str,
-    category: str,
-    description: str = "",
-    participants: list = None,
-) -> dict:
-    """
-    会議の予約を追加
-
-    Args:
-        title: 会議のタイトル
-        start_time: 開始時間。 "YYYY-MM-DD HH:MM" 形式 (例: "2026-08-21 14:00")
-        end_time: 終了時間。 start_timeと同じ形式。
-        category: 必ず「会議」「接客」「面接」「自由」のいずれか。
-                  チャット内容をもとに判断するが、どれであるか曖昧な場合は「自由」を使用する。
-        description: 会議に関する追加説明。 (任意)
-        participants: 参加させたい社員名のリスト(任意)。employeesに登録されている
-                      名前のみ紐付けられ、見つからないものは無視される。
-
-    Returns:
-        成功時 {"success": true, "reservation": {...}}
-        失敗時 {"success": false, "error": "エラーコード", ...関連情報}
-        可能なエラーコード:
-          - missing_fields: 必須項目ぬけ。
-          - invalid_category: カテゴリが4つの値のうち一つではない。
-          - invalid_datetime_format: 時間形式が間違っている。
-          - end_before_start: 終了時間が開始時間より早い。
-          - time_overlap: 会議室に重ねる時間帯の予約が既に存在する。
-    """
-    conn = _get_conn()
-    try:
-        result = db.add_reservation(
-            conn, title, start_time, end_time, category, description or None
-        )
-
-        participant_result = None
-
-        if result["success"]:
-
-            reservation_id = result["reservation"]["id"]
-
-            if participants:
-                participant_result = db.add_participants(
-                    conn,
-                    reservation_id,
-                    participants
-                )
-
-            calendar_result = google_calendar.create_event(
-                title=title,
-                start_time=result["reservation"]["start_time"],
-                end_time=result["reservation"]["end_time"],
-                description=description or None,
-            )
-            if calendar_result["success"]:
-                db.set_calendar_event_id(conn, result["reservation"]["id"], calendar_result["event_id"])
-                result["reservation"]["google_calendar_event_id"] = calendar_result["event_id"]
-                result["calendar_sync"] = "success"
-            elif calendar_result["error"] == "calendar_not_configured":
-                result["calendar_sync"] = "not_configured"
-            else:
-                result["calendar_sync"] = "failed"
-                result["calendar_error"] = calendar_result["error"]
-
-            # 참가자 처리 결과도 반환
-            if participant_result:
-                result["participants"] = participant_result
-
-        return result
+        return auth.authenticate_employee(conn, email)
     finally:
         conn.close()
 
@@ -164,28 +96,62 @@ def list_reservations_with_date (
     category: Optional[str] = None,
 ) -> dict:
     """
-    すべての予約をみる
-
-    フィルターはすべて選択項目であり、渡さなければ全体を照会する。
+    特定の日付または期間内の会議室予約リストを照会。
+    カテゴリを指定することもできる。
 
     Args:
-        date: 特定の日だけ照会したいとき、"YYYY-MM-DD" 形式
-        start_date: 照会開始日 "YYYY-MM-DD" (例: "今週", "来月" などの期間質問に使用.
-                    終了日が分からない場合は end_date と同じ値として扱われる)
-        end_date: 照会終了日 "YYYY-MM-DD" (start_date と組み合わせて範囲を形成する)
-        category: 特定のカテゴリだけ照会したいとき (「会議」「接客」「面接」「自由」)
+        date: 照会したい特定の日 ("YYYY-MM-DD") 
+        start_date: 照会開始日 ("YYYY-MM-DD") 
+        end_date: 照会終了日 ("YYYY-MM-DD") 
+        category: 特定のカテゴリを設定 (「会議」「接客」「面接」「自由」)
 
     Returns:
         {"success": true, "reservations": [予約リスト]}
-
-    参考: dateを渡すとその日だけ照会され、start_date/end_dateは無視される。
-          期間を尋ねる質問(例: "来週会議は何件ある?")には、
-          dateの代わりにstart_date/end_dateでその期間の開始日/終了日を計算して渡すこと。
     """
     conn = _get_conn()
     try:
-        return db.list_reservations(
-            conn, date=date, start_date=start_date, end_date=end_date, category=category
+        return crud.list_reservations(conn, date=date, start_date=start_date, end_date=end_date, category=category)
+    
+    finally:
+        conn.close()
+
+
+@tool_for("admin", "dify")
+def add_reservation(
+    title: str, start_time: str, end_time: str, 
+    category: str, participants: list, description: str = "",
+) -> dict:
+    """
+    会議の予約を追加
+
+    Args:
+        title: 会議のタイトル
+        start_time: 開始時間。 "YYYY-MM-DD HH:MM" 形式 (例: "2026-08-21 14:00")
+        end_time: 終了時間。 start_timeと同じ形式。
+        category: 必ず「会議」「接客」「面接」「自由」のいずれか。
+                  チャット内容をもとに判断するが、どれであるか曖昧な場合は「自由」を使用する。
+        description: 会議に関する追加説明。 (任意)
+        participants: 参加させたい社員名のリスト。employeesに登録されている
+                      名前のみ紐付けられ、見つからないものは無視される。
+
+    Returns:
+        成功時 {"success": true, "reservation": {...}}
+        失敗時 {"success": false, "error": "エラーコード", ...関連情報}
+        
+        【可能なエラーコード】
+        missing_fields ・ invalid_category ・ invalid_datetime_format ・ end_before_start ・ time_overlap
+    """
+    
+    conn = _get_conn()
+    try:
+        return crud.create_reservation_integrated(
+            conn=conn,
+            title=title,
+            start_time=start_time,
+            end_time=end_time,
+            category=category,
+            participant=participants,
+            description=description or None,
         )
     finally:
         conn.close()
@@ -197,30 +163,31 @@ def list_reservations_with_date (
 @tool_for("dify")
 def find_available_slots(
     date: str,
-    duration_minutes: int,
+    duration_minutes: int = 1, 
     business_start: str = "09:00",
     business_end: str = "18:00",
 ) -> dict:
     """
-    特定の日に空いている時間帯を探す。
-
-    ユーザーが「空いてる時間ある?」と尋ねたら、暗算で予約の隙間を計算するのではなく
-    このツールを使うこと。今日基準の相対的な日付(明日、来週火曜日など)は
-    current_timeで確認した日付を基準に計算してから渡す。
+    特定の日付に指定した時間ほど会議室の予約可能な時間帯を照会できる
 
     Args:
-        date: 照会する日付, "YYYY-MM-DD" 形式
-        duration_minutes: 必要な最小時間(分)。指定がなければ30を使う。
-        business_start: 探索開始時刻, "HH:MM" 形式 (デフォルト 09:00)
-        business_end: 探索終了時刻, "HH:MM" 形式 (デフォルト 18:00)
+        date: 照会したい特定の日 ("YYYY-MM-DD")
+        duration_minutes: 必要な最小時間(分)。(デフォルト 1)
+        business_start: 探索開始時刻 ("HH:MM") / (デフォルト 09:00)
+        business_end: 探索終了時刻 ("HH:MM") / (デフォルト 18:00)
 
     Returns:
-        {"success": true, "date": ..., "available_slots": [{"start":"HH:MM","end":"HH:MM","duration_minutes":N}, ...]}
-        available_slots が空配列なら、その条件を満たす空き時間がないという意味。
+        {
+            "success": true, 
+            "date": ..., 
+            "duration_minutes": ...,
+            "available_slots": [{"start":"HH:MM","end":"HH:MM"}, ...]}
+    
+    available_slots が空配列なら、その条件を満たす空き時間がないという意味。
     """
     conn = _get_conn()
     try:
-        return db.find_available_slots(conn, date, duration_minutes, business_start, business_end)
+        return us.find_available_slots(conn, date, duration_minutes, business_start, business_end)
     finally:
         conn.close()
 
@@ -252,9 +219,10 @@ def get_statistics(
     """
     conn = _get_conn()
     try:
-        return db.get_statistics(conn, start_date=start_date, end_date=end_date, category=category)
+        return us.get_statistics(conn, start_date=start_date, end_date=end_date, category=category)
     finally:
         conn.close()
+        
         
 @tool_for("admin", "dify")
 def list_reservations_with_employee(
@@ -271,7 +239,7 @@ def list_reservations_with_employee(
     """
     conn = _get_conn()
     try:
-        return db.get_employee_reservations(conn, email=email)
+        return fs.list_reservations_with_employee(conn, email=email)
     finally:
         conn.close()
 
@@ -283,6 +251,7 @@ def create_reservation_request(
     end_time: str,
     category: str,
     requester_email: str,
+    participant_names: List[str],
     description: str = "",
 ) -> dict:
     """
@@ -299,6 +268,8 @@ def create_reservation_request(
         requester_email: リクエストする本人のメールアドレス
                          (本人確認済みのメールアドレスをそのまま使うこと)
         description: 補足説明(任意)
+        participant_names: 参加させたい社員名のリスト(必須)。
+                           承認された時点で実際の予約に紐付けられる。
 
     Returns:
         {"success": true, "request": {...}, "conflict_warning": bool}
@@ -307,8 +278,15 @@ def create_reservation_request(
     """
     conn = _get_conn()
     try:
-        return db.create_reservation_request(
-            conn, title, start_time, end_time, category, requester_email, description or None
+        return rs.create_reservation_request(
+            conn=conn,
+            title=title,
+            start_time=start_time,
+            end_time=end_time,
+            category=category,
+            requester_email=requester_email,
+            participant_names=participant_names,
+            description=description or None,
         )
     finally:
         conn.close()
@@ -328,7 +306,7 @@ def list_reservation_requests(status: Optional[str] = None) -> dict:
     """
     conn = _get_conn()
     try:
-        return db.list_reservation_requests(conn, status=status)
+        return rs.list_reservation_requests(conn, status=status)
     finally:
         conn.close()
 
@@ -354,27 +332,7 @@ def approve_reservation_request(request_id: int) -> dict:
     """
     conn = _get_conn()
     try:
-        result = db.approve_reservation_request(conn, request_id)
-
-        if result["success"]:
-            reservation = result["reservation"]
-            calendar_result = google_calendar.create_event(
-                title=reservation["title"],
-                start_time=reservation["start_time"],
-                end_time=reservation["end_time"],
-                description=reservation.get("description"),
-            )
-            if calendar_result["success"]:
-                db.set_calendar_event_id(conn, reservation["id"], calendar_result["event_id"])
-                reservation["google_calendar_event_id"] = calendar_result["event_id"]
-                result["calendar_sync"] = "success"
-            elif calendar_result["error"] == "calendar_not_configured":
-                result["calendar_sync"] = "not_configured"
-            else:
-                result["calendar_sync"] = "failed"
-                result["calendar_error"] = calendar_result["error"]
-
-        return result
+        return rs.approve_reservation_request(conn, request_id)
     finally:
         conn.close()
 
@@ -394,7 +352,7 @@ def reject_reservation_request(request_id: int, reason: Optional[str] = None) ->
     """
     conn = _get_conn()
     try:
-        return db.reject_reservation_request(conn, request_id, reason)
+        return rs.reject_reservation_request(conn, request_id, reason)
     finally:
         conn.close()
 
