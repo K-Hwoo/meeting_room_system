@@ -46,7 +46,6 @@ CREATE TABLE IF NOT EXISTS reservation_requests (
     end_time        DATETIME NOT NULL,
     category        TEXT NOT NULL,
     description     TEXT,
-    requester_email TEXT NOT NULL,
     participant_names TEXT NOT NULL, 
     status          TEXT NOT NULL DEFAULT 'pending',
     reject_reason   TEXT,

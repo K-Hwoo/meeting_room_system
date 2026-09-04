@@ -250,7 +250,6 @@ def create_reservation_request(
     start_time: str,
     end_time: str,
     category: str,
-    requester_email: str,
     participant_names: List[str],
     description: str = "",
 ) -> dict:
@@ -265,8 +264,6 @@ def create_reservation_request(
         start_time: 開始時間、"YYYY-MM-DD HH:MM" 形式
         end_time: 終了時間、同じ形式
         category: 「会議」「接客」「面接」「自由」のいずれか
-        requester_email: リクエストする本人のメールアドレス
-                         (本人確認済みのメールアドレスをそのまま使うこと)
         description: 補足説明(任意)
         participant_names: 参加させたい社員名のリスト(必須)。
                            承認された時点で実際の予約に紐付けられる。
@@ -284,7 +281,6 @@ def create_reservation_request(
             start_time=start_time,
             end_time=end_time,
             category=category,
-            requester_email=requester_email,
             participant_names=participant_names,
             description=description or None,
         )
@@ -338,13 +334,13 @@ def approve_reservation_request(request_id: int) -> dict:
 
 
 @tool_for("admin", "dify")
-def reject_reservation_request(request_id: int, reason: Optional[str] = None) -> dict:
+def reject_reservation_request(request_id: int, reason: str) -> dict:
     """
     予約リクエストを却下する(管理者用)。実際の予約は作成しない。
 
     Args:
         request_id: 却下するリクエストのID
-        reason: 却下理由(任意、あとで参照できるよう残しておくとよい)
+        reason: 却下理由（必須。空文字・空白のみは不可）
 
     Returns:
         成功時 {"success": true, "request": {...}}

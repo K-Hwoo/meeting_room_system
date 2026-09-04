@@ -12,7 +12,6 @@ def create_reservation_request(
     start_time: str,
     end_time: str,
     category: str,
-    requester_email: str,
     participant_names: list,
     description: str = None,
 ) -> dict:
@@ -39,13 +38,15 @@ def create_reservation_request(
         missing.append("end_time")
     if not category:
         missing.append("category")
-    if not requester_email:
-        missing.append("requester_email")
     if not participant_names:
         missing.append("participant_names")
     
     if missing:
-        return {"success": False, "error": "missing_fields", "missing_fields": missing}
+        return {
+            "success": False, 
+            "error": "missing_fields", 
+            "missing_fields": missing
+        }
 
     if category not in VALID_CATEGORIES:
         return {
@@ -81,10 +82,10 @@ def create_reservation_request(
     cur = conn.execute(
         """
         INSERT INTO reservation_requests
-            (title, start_time, end_time, category, description, requester_email, participant_names, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+            (title, start_time, end_time, category, description, participant_names, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending')
         """,
-        (title, norm_start, norm_end, category, description, requester_email, participant_names_json),
+        (title, norm_start, norm_end, category, description, participant_names_json),
     )
     conn.commit()
     new_id = cur.lastrowid
@@ -207,8 +208,16 @@ def approve_reservation_request(conn, request_id: int) -> dict:
     return response
 
 
-def reject_reservation_request(conn, request_id: int, reason: str = None) -> dict:
+def reject_reservation_request(conn, request_id: int, reason: str) -> dict:
     """保留中のリクエストを却下する。実際の予約は作成しない。"""
+    if not isinstance(reason, str) or not reason.strip():
+        return {
+            "success": False,
+            "error": "reject_reason_required",
+            "message": "却下理由を入力してください。",
+        }
+    reason = reason.strip()
+
     row = conn.execute("SELECT * FROM reservation_requests WHERE id = ?", (request_id,)).fetchone()
     if row is None:
         return {
