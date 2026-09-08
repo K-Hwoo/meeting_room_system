@@ -1,12 +1,20 @@
 import json
+from utils.format_tools import parse_text_to_list
 
-# 회의실 예약 정보에 구글캘린더 일정 id 추가
-# 予約にGoogleカレンダーのイベントIDを紐付けて保存する。
+"""
+회의실 예약 정보에 구글캘린더 일정 id 추가
+予約にGoogleカレンダーのイベントIDを紐付けて保存する。
+"""
 def set_calendar_event_id(conn, reservation_id: int, event_id: str) -> dict:
     conn.execute(
-        "UPDATE reservations SET google_calendar_event_id = ? WHERE id = ?",
+        """
+        UPDATE reservations 
+        SET google_calendar_event_id = ? 
+        WHERE id = ?
+        """,
         (event_id, reservation_id),
     )
+    
     conn.commit()
     
     return {
@@ -14,35 +22,32 @@ def set_calendar_event_id(conn, reservation_id: int, event_id: str) -> dict:
         "reservation_id": reservation_id, 
         "event_id": event_id
     }
-
-
-# 예약 행의 participants 컬럼(JSON 배열)에 참여 사원 ID를 저장
+ 
+    
+"""
+회의실 예약 정보에 참가자 추가
+予約に参加者を追加する。
+"""
 def add_participants(conn, reservation_id: int, names: list) -> dict:
+
     row = conn.execute(
         "SELECT participants FROM reservations WHERE id = ?",
         (reservation_id,),
     ).fetchone()
-    
+
     if row is None:
         return {
-            "success": False, 
-            "error": "reservation_not_found", 
-            "reservation_id": reservation_id
+            "success": False,
+            "error": "reservation_not_found",
+            "reservation_id": reservation_id,
         }
 
-    try:
-        current_ids = json.loads(row["participants"] or "[]")
-        
-    except (TypeError, ValueError):
-        current_ids = []
-
-    if not isinstance(current_ids, list):
-        current_ids = []
+    current_ids = parse_text_to_list(row["participants"])
 
     added = []
     not_found = []
 
-    for name in names or []:
+    for name in names:
         employee = conn.execute(
             "SELECT id, name, email FROM employees WHERE name = ?",
             (name,),
@@ -53,6 +58,7 @@ def add_participants(conn, reservation_id: int, names: list) -> dict:
             continue
 
         employee_id = employee["id"]
+
         if employee_id not in current_ids:
             current_ids.append(employee_id)
 
@@ -64,8 +70,12 @@ def add_participants(conn, reservation_id: int, names: list) -> dict:
 
     conn.execute(
         "UPDATE reservations SET participants = ? WHERE id = ?",
-        (json.dumps(current_ids, ensure_ascii=False), reservation_id),
+        (
+            json.dumps(current_ids, ensure_ascii=False),
+            reservation_id,
+        ),
     )
+
     conn.commit()
 
     return {

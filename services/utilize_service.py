@@ -1,11 +1,15 @@
 import sqlite3
 import datetime
 
+from datetime import datetime
 from utils.server_setting import VALID_CATEGORIES
 from utils.format_tools import parse_date_only, parse_hhmm
 
-# 회의실 예약 일정을 확인 후 그 날의 빈 시간 목록을 알려줌
-# 空いている時間帯の検索 / 特定の日に duration_minutes 以上空いている時間帯をすべて探して返す。
+"""
+회의실 예약 일정을 확인 후 그 날의 빈 시간 목록을 알려줌
+- 空いている時間帯の検索
+- 特定の日に duration_minutes 以上空いている時間帯をすべて探して返す。
+"""
 def find_available_slots(
     conn: sqlite3.Connection, date: str, duration_minutes: int,
     business_start: str, business_end: str,
@@ -180,4 +184,4 @@ def get_statistics(
         "by_hour": dict(sorted(by_hour.items())),
         "daily_counts": dict(sorted(daily_counts.items())),
         "average_duration_minutes": round(total_duration / total, 1),
-    }
+    }    

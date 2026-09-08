@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS reservations (
     description  TEXT,
     participants TEXT NOT NULL DEFAULT '[]',
     google_calendar_event_id  TEXT,   -- Googleカレンダーに探しやすいにするため
+    reminder_sent_at          DATETIME,
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
  
     -- 終了時間が開始時間より早くなる誤入力を防止

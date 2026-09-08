@@ -13,6 +13,9 @@ import services.find_service as fs
 
 from utils.database import get_connection
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from services.email_service import send_upcoming_reminders
+
 # "admin" または "dify"
 MODE = os.environ.get("MCP_MODE", "admin")
 
@@ -24,6 +27,24 @@ DB_PATH = os.environ.get(
     "MEETING_ROOM_DB_PATH",
     os.path.join(_SCRIPT_DIR, "database", "meeting_room.db"),
 )
+
+def start_reminder_scheduler():
+    scheduler = BackgroundScheduler(
+        timezone="Asia/Tokyo"
+    )
+
+    scheduler.add_job(
+        send_upcoming_reminders,
+        trigger="interval",
+        minutes=1,
+        args=[DB_PATH],
+        id="meeting_reminder_job",
+        replace_existing=True,
+    )
+
+    scheduler.start()
+
+    return scheduler
 
 # 初期化SQLファイルのパス設定
 SQL_INIT_PATH = os.path.join(_SCRIPT_DIR, "database", "database_setting.sql")
@@ -54,6 +75,7 @@ def _init_db_if_needed():
 
 
 _init_db_if_needed()
+reminder_scheduler = start_reminder_scheduler()
 mcp = FastMCP("meeting-room-server")
 
 
@@ -243,7 +265,7 @@ def list_reservations_with_employee(
     finally:
         conn.close()
 
-
+# ===========================================================
 @tool_for("dify")
 def create_reservation_request(
     title: str,
@@ -256,22 +278,17 @@ def create_reservation_request(
     """
     一般社員が会議室の予約をリクエストする。
 
-    このツールは実際の予約を作らず、管理者の承認待ち状態として記録するだけ。
-    一般社員向けAgentにのみ接続すること(管理者はadd_reservationで直接予約可能)。
-
     Args:
-        title: 会議のタイトル
-        start_time: 開始時間、"YYYY-MM-DD HH:MM" 形式
-        end_time: 終了時間、同じ形式
-        category: 「会議」「接客」「面接」「自由」のいずれか
+        title: 会議タイトル
+        start_time: 開始時間 ("YYYY-MM-DD HH:MM")
+        end_time: 終了時間 ("YYYY-MM-DD HH:MM")
+        category: 「会議」「接客」「面接」「自由」
+        participant_names: 参加者名のリスト(必須)
         description: 補足説明(任意)
-        participant_names: 参加させたい社員名のリスト(必須)。
-                           承認された時点で実際の予約に紐付けられる。
 
     Returns:
-        {"success": true, "request": {...}, "conflict_warning": bool}
-        conflict_warning が true なら、その時間帯に既に他の予約があることを意味する。
-        リクエスト自体は成功しているが、承認されない可能性が高いことをユーザーに伝えるとよい。
+        成功: {"success": true, "request": {...}}
+        失敗: {"success": false, "error": "..."}
     """
     conn = _get_conn()
     try:

@@ -1,100 +1,82 @@
-from utils.server_setting import VALID_CATEGORIES
-from utils.format_tools import DATETIME_FORMATS
-from utils.format_tools import parse_datetime
-from utils.format_tools import row_to_dict
+from utils.format_tools import row_to_dict, validate_reservation_input
 from services.crud_service import find_overlapping, create_reservation_integrated
 
 import json
 
+
 def create_reservation_request(
     conn,
-    title: str,
-    start_time: str,
-    end_time: str,
-    category: str,
-    participant_names: list,
-    description: str = None,
+    title: str, start_time: str, end_time: str,
+    category: str, participant_names: list, description: str = None,
 ) -> dict:
     """
-    一般社員が予約をリクエストする。実際の reservations には書き込まず、
-    reservation_requests に status='pending' として記録するだけ。
-    管理者が approve_reservation_request を実行して初めて実際の予約になる。
-
-    参加者(participant_names)も一緒にJSON文字列として保存しておき、
-    承認時に reservations.participants(JSON配列)へ保存する。
+    一般社員が予約をリクエストする。
 
     Returns:
-        成功: {"success": true, "request": {...}, "conflict_warning": bool}
-             conflict_warning が true の場合、その時間帯に既存の予約と重複がある
-             (リクエスト自体はブロックしないが、管理者が承認時に再確認できるよう警告)
-        失敗: {"success": false, "error": "エラーコード", ...}
+        成功: {"success": true, "request": {...}}
+             
+        失敗: {"success": false, "error": "time_overlap", "conflicts": [...]}
     """
-    missing = []
-    if not title:
-        missing.append("title")
-    if not start_time:
-        missing.append("start_time")
-    if not end_time:
-        missing.append("end_time")
-    if not category:
-        missing.append("category")
     if not participant_names:
-        missing.append("participant_names")
-    
-    if missing:
-        return {
-            "success": False, 
-            "error": "missing_fields", 
-            "missing_fields": missing
-        }
-
-    if category not in VALID_CATEGORIES:
         return {
             "success": False,
-            "error": "invalid_category",
-            "valid_categories": VALID_CATEGORIES,
-            "given": category,
+            "error": "missing_fields",
+            "missing_fields": ["participant_names"],
         }
 
-    norm_start = parse_datetime(start_time)
-    norm_end = parse_datetime(end_time)
-    if norm_start is None or norm_end is None:
-        return {
-            "success": False,
-            "error": "invalid_datetime_format",
-            "expected_formats": DATETIME_FORMATS,
-            "given": {"start_time": start_time, "end_time": end_time},
-        }
+    validation = validate_reservation_input(
+        title,
+        start_time,
+        end_time,
+        category,
+    )
 
-    if norm_start >= norm_end:
-        return {
-            "success": False,
-            "error": "end_before_start",
-            "start_time": norm_start,
-            "end_time": norm_end,
-        }
+    if not validation["success"]:
+        return validation
 
-    # 既存予約との重複は参考情報として確認するのみ(ブロックしない)
+    norm_start = validation["start_time"]
+    norm_end = validation["end_time"]
+
     conflicts = find_overlapping(conn, norm_start, norm_end)
 
-    participant_names_json = json.dumps(participant_names, ensure_ascii=False)
+    if conflicts:
+        return {
+            "success": False,
+            "error": "conflict_found",
+            "conflicts": [row_to_dict(c) for c in conflicts]
+        }
+
+
+    participant_names_json = json.dumps(
+        participant_names, 
+        ensure_ascii=False,
+    )
 
     cur = conn.execute(
         """
         INSERT INTO reservation_requests
-            (title, start_time, end_time, category, description, participant_names, status)
+            (
+                title, start_time, end_time, 
+                category, description, participant_names, status
+            )
         VALUES (?, ?, ?, ?, ?, ?, 'pending')
         """,
-        (title, norm_start, norm_end, category, description, participant_names_json),
+        (
+            title, norm_start, norm_end, 
+            category, description, participant_names_json
+        ),
     )
+    
     conn.commit()
     new_id = cur.lastrowid
-    row = conn.execute("SELECT * FROM reservation_requests WHERE id = ?", (new_id,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM reservation_requests WHERE id = ?", 
+        (new_id,)
+    ).fetchone()
 
     return {
         "success": True,
         "request": row_to_dict(row),
-        "conflict_warning": bool(conflicts),
     }
 
 

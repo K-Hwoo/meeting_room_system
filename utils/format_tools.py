@@ -2,37 +2,52 @@ import sqlite3
 import json
 from datetime import datetime
 
+from utils.server_setting import VALID_CATEGORIES
+
 DATETIME_FORMATS = [
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
 ]
 
-# 튜플로 반환되는 sqlite return 값을 딕셔너리화
+
+"""
+튜플로 반환되는 sqlite return값을 딕셔너리화
+列名をキー、行の値をバリューとするDictionaryを返します。
+"""
 def row_to_dict(row: sqlite3.Row) -> dict:
     return {k: row[k] for k in row.keys()}
 
 
-def parse_json_list(value) -> list:
-    """SQLite TEXT에 저장된 JSON 배열을 Python list로 변환한다."""
+def parse_text_to_list(value) -> list:
+    """
+    SQLiteのTEXTに格納された値を
+    Pythonのリストに変換します。
+    """
     if value is None:
         return []
-    if isinstance(value, list):
-        return value
+    
+    # if isinstance(value, list):
+    #     return value
+    
     try:
         parsed = json.loads(value)
+        
     except (TypeError, ValueError):
         return []
+    
     return parsed if isinstance(parsed, list) else []
 
 
-def reservation_row_to_dict(row: sqlite3.Row) -> dict:
+def get_reservation_data(row: sqlite3.Row) -> dict:
     data = row_to_dict(row)
     
-    if "participants" in data:
-        data["participants"] = parse_json_list(data["participants"])
+    # if "participants" in data:
+    # 지금은 무조건 participants 컬럼이 존재하므로, 아래 코드 실행
+    data["participants"] = parse_text_to_list(data["participants"])
         
     return data
 
+# ====================================================================
 
 def resolve_date_range(date, start_date, end_date):
     # 날짜를 받으면 (날짜, 날짜) return
@@ -85,3 +100,70 @@ def parse_hhmm(value: str):
         return dt.hour * 60 + dt.minute
     except ValueError:
         return None
+    
+# ====================================================================
+
+def validate_reservation_input(
+    title: str,
+    start_time: str,
+    end_time: str,
+    category: str,
+) -> dict:
+
+    missing = []
+
+    if not title:
+        missing.append("title")
+    if not start_time:
+        missing.append("start_time")
+    if not end_time:
+        missing.append("end_time")
+    if not category:
+        missing.append("category")
+
+    if missing:
+        return {
+            "success": False,
+            "error": "missing_fields",
+            "missing_fields": missing,
+        }
+
+    # 지정한 4개의 카테고리 이외의 것을 받으면 에러처리
+    if category not in VALID_CATEGORIES:
+        return {
+            "success": False,
+            "error": "invalid_category",
+            "valid_categories": VALID_CATEGORIES,
+            "given": category,
+        }
+
+    norm_start = parse_datetime(start_time)
+    norm_end = parse_datetime(end_time)
+
+    # norm_start랑 norm_end가 None이 들어가는 경우에는 에러처리
+    # => Dify LLM으로부터 받은 날짜 형식에 문제가 있음을 나타냄
+    if norm_start is None or norm_end is None:
+        return {
+            "success": False,
+            "error": "invalid_datetime_format",
+            "expected_formats": DATETIME_FORMATS,
+            "given": {
+                "start_time": start_time,
+                "end_time": end_time,
+            },
+        }
+
+    # 시작 시간이 종료 시간보다 뒤인 경우는 에러처리
+    if norm_start >= norm_end:
+        return {
+            "success": False,
+            "error": "end_before_start",
+            "start_time": norm_start,
+            "end_time": norm_end,
+        }
+
+    return {
+        "success": True,
+        "start_time": norm_start,
+        "end_time": norm_end,
+    }
