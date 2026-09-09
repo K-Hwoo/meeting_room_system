@@ -2,8 +2,67 @@ from utils.format_tools import row_to_dict, validate_reservation_input
 from services.crud_service import find_overlapping, create_reservation_integrated
 
 import json
+from datetime import datetime
 
 
+def check_manual_approval(
+    start_time: str,
+    end_time: str,
+    participant_names: list,
+    category: str = None,
+) -> dict:
+
+    start = datetime.strptime(
+        start_time,
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    end = datetime.strptime(
+        end_time,
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    duration_minutes = int(
+        (end - start).total_seconds() / 60
+    )
+
+    participant_count = len(set(participant_names))
+
+    reservation_info = {
+        "duration_minutes": duration_minutes,
+        "participant_count": participant_count,
+        "category": category,
+        "start_time": start,
+        "end_time": end,
+    }
+
+    approval_rules = [
+        {
+            "code": "duration_3_hours_or_more",
+            "check": lambda info: info["duration_minutes"] >= 180,
+        },
+        {
+            "code": "participants_20_or_more",
+            "check": lambda info: info["participant_count"] >= 20,
+        },
+    ]
+
+    reasons = []
+
+    for rule in approval_rules:
+        if rule["check"](reservation_info):
+            reasons.append(rule["code"])
+
+    return {
+        "required": bool(reasons),
+        "reasons": reasons,
+        "details": {
+            "duration_minutes": duration_minutes,
+            "participant_count": participant_count,
+        },
+    }
+    
+    
 def create_reservation_request(
     conn,
     title: str, start_time: str, end_time: str,
@@ -46,6 +105,11 @@ def create_reservation_request(
             "conflicts": [row_to_dict(c) for c in conflicts]
         }
 
+    approval_check = check_manual_approval(
+        norm_start,
+        norm_end,
+        participant_names,
+    )
 
     participant_names_json = json.dumps(
         participant_names, 
@@ -69,15 +133,56 @@ def create_reservation_request(
     
     conn.commit()
     new_id = cur.lastrowid
-    row = conn.execute(
-        "SELECT * FROM reservation_requests WHERE id = ?", 
-        (new_id,)
-    ).fetchone()
+    
+    # 3시간 이상 또는 20명 이상이면 관리자 승인 대기
+    if approval_check["required"]:
 
-    return {
-        "success": True,
-        "request": row_to_dict(row),
-    }
+        row = conn.execute(
+            """
+            SELECT *
+            FROM reservation_requests
+            WHERE id = ?
+            """,
+            (new_id,),
+        ).fetchone()
+
+        return {
+            "success": True,
+            "auto_approved": False,
+            "approval_required": True,
+            "approval_reasons": approval_check["reasons"],
+            "request": row_to_dict(row),
+        }
+    
+    
+    # row = conn.execute(
+    #     "SELECT * FROM reservation_requests WHERE id = ?", 
+    #     (new_id,)
+    # ).fetchone()
+
+    # return {
+    #     "success": True,
+    #     "request": row_to_dict(row),
+    # }
+    
+    # 승인 조건에 해당하지 않으면 자동 승인
+    approval_result = approve_reservation_request(
+        conn,
+        new_id,
+    )
+
+    if not approval_result["success"]:
+        return {
+            "success": False,
+            "error": "auto_approve_failed",
+            "request_id": new_id,
+            "reason": approval_result,
+        }
+
+    approval_result["auto_approved"] = True
+    approval_result["approval_required"] = False
+
+    return approval_result
 
 
 def list_reservation_requests(conn, status: str = None) -> dict:
@@ -105,8 +210,8 @@ def list_reservation_requests(conn, status: str = None) -> dict:
         ).fetchall()
 
     return {"success": True, "requests": [row_to_dict(r) for r in rows]}
-
-
+    
+    
 def approve_reservation_request(conn, request_id: int) -> dict:
     """
     保留中のリクエストを承認し、実際の予約を作成する。
