@@ -3,10 +3,17 @@ from utils.format_tools import parse_text_to_list
 """
 이메일에 해당하는 사원이 참여하는 예약 목록을 반환한다.
 """
-def list_reservations_with_employee(conn, email: str) -> dict:
+def list_reservations_with_employee(
+    conn,
+    email: str,
+    date: str = None,
+    start_date: str = None,
+    end_date: str = None,
+) -> dict:
+
     employee = conn.execute(
         """
-        SELECT id 
+        SELECT id
         FROM employees
         WHERE LOWER(email) = LOWER(?)
         """,
@@ -20,24 +27,52 @@ def list_reservations_with_employee(conn, email: str) -> dict:
         }
 
     employee_id = employee["id"]
-    
+
+    query = """
+        SELECT
+            id,
+            title,
+            start_time,
+            end_time,
+            participants
+        FROM reservations
+        WHERE 1=1
+    """
+
+    params = []
+
+    if date:
+        query += " AND date(start_time) = date(?)"
+        params.append(date)
+
+    elif start_date or end_date:
+
+        range_start = start_date or end_date
+        range_end = end_date or start_date
+
+        query += """
+            AND date(start_time) <= date(?)
+            AND date(end_time) >= date(?)
+        """
+
+        params.extend([
+            range_end,
+            range_start,
+        ])
+
+    query += " ORDER BY start_time, id"
+
     rows = conn.execute(
-        """
-        SELECT 
-            id, 
-            title, 
-            start_time, 
-            end_time, 
-            participants 
-        FROM reservations 
-        ORDER BY start_time, id
-        """
+        query,
+        params,
     ).fetchall()
 
     reservations = []
-    
+
     for r in rows:
-        if employee_id in parse_text_to_list(r["participants"]):
+        if employee_id in parse_text_to_list(
+            r["participants"]
+        ):
             reservations.append({
                 "id": r["id"],
                 "title": r["title"],
@@ -45,14 +80,8 @@ def list_reservations_with_employee(conn, email: str) -> dict:
                 "end_time": r["end_time"],
             })
 
-    if not reservations:
-        return {
-            "success": False,
-            "error": "NO_RESERVATIONS_FOUND",
-        }
-
     return {
-        "success": True, 
+        "success": True,
         "reservations": reservations,
     }
 
@@ -133,4 +162,38 @@ def get_reservation_participant_emails(conn, reservation_id: int,) -> dict:
         "success": True,
         "reservation_id": reservation_id,
         "emails": emails,
+    }
+    
+    
+def find_employee_by_name_or_email(
+    conn,
+    value: str,
+) -> dict:
+
+    value = value.strip()
+
+    employee = conn.execute(
+        """
+        SELECT id, name, email
+        FROM employees
+        WHERE LOWER(email) = LOWER(?)
+           OR name = ?
+        """,
+        (value, value),
+    ).fetchone()
+
+    if employee is None:
+        return {
+            "success": False,
+            "error": "employee_not_found",
+            "given": value,
+        }
+
+    return {
+        "success": True,
+        "employee": {
+            "id": employee["id"],
+            "name": employee["name"],
+            "email": employee["email"],
+        },
     }

@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime
 
 from utils.server_setting import VALID_CATEGORIES
 from utils.format_tools import (
@@ -25,6 +26,66 @@ def find_overlapping(conn, start_time, end_time, exclude_id=None) -> list:
 
     rows = conn.execute(query, params).fetchall()
     return [get_reservation_data(r) for r in rows]
+
+
+def find_recurring_overlapping(
+    conn,
+    start_time: str,
+    end_time: str,
+) -> list:
+
+    requested_start = datetime.strptime(
+        start_time,
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    requested_end = datetime.strptime(
+        end_time,
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    recurring_rows = conn.execute(
+        """
+        SELECT *
+        FROM recurring_reservations
+        """
+    ).fetchall()
+
+    conflicts = []
+
+    for row in recurring_rows:
+        recurring_start_date = datetime.strptime(
+            row["start_date"],
+            "%Y-%m-%d",
+        ).date()
+
+        requested_date = requested_start.date()
+
+        # 정기예약 시작 이전이면 무시
+        if requested_date < recurring_start_date:
+            continue
+
+        # 해당 요일이 아니면 무시
+        if requested_date.weekday() != row["weekday"]:
+            continue
+
+        recurring_start = datetime.strptime(
+            f"{requested_date} {row['start_time']}",
+            "%Y-%m-%d %H:%M",
+        )
+
+        recurring_end = datetime.strptime(
+            f"{requested_date} {row['end_time']}",
+            "%Y-%m-%d %H:%M",
+        )
+
+        if (
+            requested_start < recurring_end
+            and requested_end > recurring_start
+        ):
+            conflicts.append(dict(row))
+
+    return conflicts
 
 # =============================================================================
 
@@ -98,6 +159,19 @@ def create_reservation(
             "success": False, 
             "error": "time_overlap", 
             "conflicts": overlapping
+        }
+        
+    recurring_overlapping = find_recurring_overlapping(
+        conn,
+        norm_start,
+        norm_end,
+    )
+
+    if recurring_overlapping:
+        return {
+            "success": False,
+            "error": "recurring_time_overlap",
+            "conflicts": recurring_overlapping,
         }
 
     # 予約追加

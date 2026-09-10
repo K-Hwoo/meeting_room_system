@@ -1,10 +1,21 @@
 # Meeting Room System
 
-Dify와 MCP 클라이언트에서 사용할 수 있는 회의실 예약 서버입니다. 자연어로 예약을 조회하거나 예약 요청을 만들 수 있고, 관리자는 요청을 승인하거나 거절할 수 있습니다. 확정된 예약은 설정에 따라 Google Calendar에도 함께 등록됩니다.
+Dify 플랫폼에서 사용하는 것을 목적으로 한 회의실 운용 시스템입니다. 자연어로 예약을 조회하거나 예약 요청을 만들 수 있고, 관리자는 요청을 승인하거나 거절할 수 있습니다.
+확정된 예약은 설정에 따라 Google Calendar에도 함께 등록됩니다.
 
-이 프로젝트는 사내 회의실 예약 과정을 AI 에이전트와 연결해보는 것을 목표로 만들었습니다. 데이터는 SQLite에 저장하므로 별도의 DB 서버 없이 실행할 수 있습니다.
+이 프로젝트는 AI 에이전트를 통해 사내 회의실 예약 시스템을 제작해 보는 것을 목표로 만들었습니다. 데이터는 SQLite에 저장하므로 별도의 DB 서버 없이 실행할 수 있습니다.
 
-## 주요 기능
+## 주요 기능 (MCP Tools)
+
+[공통 기능]
+
+- 회의실 예약 현황 조회
+    - 특정 날짜나 기간으로 회의실 예약 현황을 조회할 수 있습니다.
+    -
+
+관리자 기능
+
+일반 사원 기능
 
 - 이메일을 이용한 직원 확인
 - 날짜, 기간, 카테고리별 예약 조회
@@ -16,22 +27,6 @@ Dify와 MCP 클라이언트에서 사용할 수 있는 회의실 예약 서버�
 - 관리자의 예약 요청 승인 및 거절
 - Google Calendar 선택 연동
 
-## 동작 흐름
-
-현재 흐름은 크게 사용자용 Dify 에이전트와 관리자용 MCP 도구로 나뉩니다. Dify 워크플로의 세부 분기는 추후 실제 YAML 구성을 기준으로 보완할 예정입니다.
-
-```mermaid
-flowchart LR
-    U[사용자] --> D[Dify Agent]
-    D --> M[MCP Server]
-    A[관리자] --> M
-    M --> S[예약 서비스]
-    S --> DB[(SQLite)]
-    S -. 설정된 경우 .-> G[Google Calendar]
-```
-
-일반 직원이 만든 요청은 바로 예약으로 확정되지 않습니다. 먼저 `pending` 상태로 저장되고, 관리자가 승인해야 실제 예약이 생성됩니다. 승인 시점에 이미 다른 예약이 생겼다면 다시 중복 검사를 수행하고 요청을 대기 상태로 남깁니다.
-
 ## 사용 기술
 
 - Python
@@ -40,29 +35,7 @@ flowchart LR
 - Dify
 - Google Calendar API
 
-## 프로젝트 구조
-
-```text
-meeting_room_system/
-├─ mcp_server.py
-├─ run_mcp.ps1
-├─ database/
-│  ├─ database_setting.sql
-│  └─ meeting_room.db
-├─ services/
-│  ├─ authentication.py
-│  ├─ crud_service.py
-│  ├─ find_service.py
-│  ├─ request_service.py
-│  ├─ save_info_service.py
-│  └─ utilize_service.py
-├─ utils/
-│  ├─ database.py
-│  ├─ format_tools.py
-│  ├─ google_calendar.py
-│  └─ server_setting.py
-└─ readme.md
-```
+## 사용 가이드
 
 `services`에는 예약과 요청을 처리하는 로직이 있고, `utils`에는 DB 연결, 날짜 변환, Google Calendar 연동 코드가 들어 있습니다. `mcp_server.py`는 이 기능들을 MCP 도구로 공개합니다.
 
@@ -120,30 +93,30 @@ npx @modelcontextprotocol/inspector
 
 ## 환경변수
 
-| 이름 | 기본값 | 설명 |
-| --- | --- | --- |
-| `MCP_MODE` | `admin` | `admin` 또는 `dify` |
-| `PORT` | `8001` | Dify 모드에서 사용할 포트 |
-| `MEETING_ROOM_DB_PATH` | `database/meeting_room.db` | SQLite DB 파일 경로 |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | 없음 | Google 서비스 계정 JSON 파일 경로 |
-| `GOOGLE_CALENDAR_ID` | 없음 | 연동할 Google Calendar ID |
+| 이름                          | 기본값                     | 설명                              |
+| ----------------------------- | -------------------------- | --------------------------------- |
+| `MCP_MODE`                    | `admin`                    | `admin` 또는 `dify`               |
+| `PORT`                        | `8001`                     | Dify 모드에서 사용할 포트         |
+| `MEETING_ROOM_DB_PATH`        | `database/meeting_room.db` | SQLite DB 파일 경로               |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | 없음                       | Google 서비스 계정 JSON 파일 경로 |
+| `GOOGLE_CALENDAR_ID`          | 없음                       | 연동할 Google Calendar ID         |
 
 DB 파일이 없으면 서버 시작 시 `database/database_setting.sql`을 사용해 새로 생성합니다.
 
 ## 제공하는 MCP 도구
 
-| 도구 | 모드 | 역할 |
-| --- | --- | --- |
-| `authenticate_employee` | Dify | 이메일로 직원 확인 |
-| `list_reservations_with_date` | Admin / Dify | 날짜, 기간, 카테고리별 예약 조회 |
-| `add_reservation` | Admin / Dify | 예약을 바로 생성 |
-| `find_available_slots` | Dify | 지정한 날짜의 빈 시간 조회 |
-| `get_statistics` | Dify | 예약 이용 통계 조회 |
-| `list_reservations_with_employee` | Admin / Dify | 직원별 참여 일정 조회 |
-| `create_reservation_request` | Dify | 예약 요청을 대기 상태로 등록 |
-| `list_reservation_requests` | Admin / Dify | 예약 요청 목록 조회 |
-| `approve_reservation_request` | Admin / Dify | 요청 승인 및 실제 예약 생성 |
-| `reject_reservation_request` | Admin / Dify | 요청 거절 및 사유 저장 |
+| 도구                              | 모드         | 역할                             |
+| --------------------------------- | ------------ | -------------------------------- |
+| `authenticate_employee`           | Dify         | 이메일로 직원 확인               |
+| `list_reservations_with_date`     | Admin / Dify | 날짜, 기간, 카테고리별 예약 조회 |
+| `add_reservation`                 | Admin / Dify | 예약을 바로 생성                 |
+| `find_available_slots`            | Dify         | 지정한 날짜의 빈 시간 조회       |
+| `get_statistics`                  | Dify         | 예약 이용 통계 조회              |
+| `list_reservations_with_employee` | Admin / Dify | 직원별 참여 일정 조회            |
+| `create_reservation_request`      | Dify         | 예약 요청을 대기 상태로 등록     |
+| `list_reservation_requests`       | Admin / Dify | 예약 요청 목록 조회              |
+| `approve_reservation_request`     | Admin / Dify | 요청 승인 및 실제 예약 생성      |
+| `reject_reservation_request`      | Admin / Dify | 요청 거절 및 사유 저장           |
 
 예약 시간은 `YYYY-MM-DD HH:MM` 형식으로 전달합니다. 카테고리는 코드와 DB에서 사용하는 다음 값 중 하나여야 합니다.
 

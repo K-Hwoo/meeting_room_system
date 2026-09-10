@@ -14,10 +14,9 @@ import services.find_service as fs
 from utils.database import get_connection
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from services.email_service import send_upcoming_reminders
+import services.email_service as es
+import services.recurring_service as recurring
 
-# "admin" または "dify"
-MODE = os.environ.get("MCP_MODE", "admin")
 
 # 현재 실행 중인 파이썬 스크립트 파일이 저장된 디렉터리의 절대 경로
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,17 +27,30 @@ DB_PATH = os.environ.get(
     os.path.join(_SCRIPT_DIR, "database", "meeting_room.db"),
 )
 
-def start_reminder_scheduler():
+def start_scheduler():
+
     scheduler = BackgroundScheduler(
         timezone="Asia/Tokyo"
     )
 
+    # 15분 전 회의 알림
     scheduler.add_job(
-        send_upcoming_reminders,
+        es.send_upcoming_reminders,
         trigger="interval",
         minutes=1,
         args=[DB_PATH],
         id="meeting_reminder_job",
+        replace_existing=True,
+    )
+
+    # 정기예약 생성
+    scheduler.add_job(
+        recurring.run_recurring_reservation_scheduler,
+        trigger="cron",
+        hour=0,
+        minute=5,
+        args=[DB_PATH],
+        id="recurring_reservation_job",
         replace_existing=True,
     )
 
@@ -75,26 +87,15 @@ def _init_db_if_needed():
 
 
 _init_db_if_needed()
-reminder_scheduler = start_reminder_scheduler()
+reminder_scheduler = start_scheduler()
 mcp = FastMCP("meeting-room-server")
 
 
 def _get_conn() -> sqlite3.Connection:
     return get_connection(DB_PATH)
 
-def tool_for(*modes):
-    """
-    매개변수로 전달받은 모드(*modes)일 때만,
-    이 함수를 AI(MCP)가 사용할 수 있는 '툴'로 등록하는 데코레이터
-    """
-    def decorator(func):
-        if MODE in modes:
-            return mcp.tool()(func)
-        return func
-    return decorator
-
 # ========================================================
-@tool_for("dify")
+@mcp.tool()
 def authenticate_employee(email: str) -> dict:
     """
     【社員認証】
@@ -104,13 +105,14 @@ def authenticate_employee(email: str) -> dict:
         email: 確認対象のメールアドレス
     """
     conn = _get_conn()
+    
     try:
         return auth.authenticate_employee(conn, email)
     finally:
         conn.close()
 
 
-@tool_for("admin", "dify")
+@mcp.tool()
 def list_reservations_with_date (
     date: Optional[str] = None,
     start_date: Optional[str] = None,
@@ -138,7 +140,7 @@ def list_reservations_with_date (
         conn.close()
 
 
-@tool_for("admin", "dify")
+@mcp.tool()
 def add_reservation(
     title: str, start_time: str, end_time: str, 
     category: str, participants: list, description: str = "",
@@ -182,7 +184,7 @@ def add_reservation(
 # ============================================================
 # 空き時間・統計 (dify専用。ユーザー向け問い合わせ機能)
 # ============================================================
-@tool_for("dify")
+@mcp.tool()
 def find_available_slots(
     date: str,
     duration_minutes: int = 1, 
@@ -214,7 +216,7 @@ def find_available_slots(
         conn.close()
 
 
-@tool_for("dify")
+@mcp.tool()
 def get_statistics(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -246,7 +248,7 @@ def get_statistics(
         conn.close()
         
         
-@tool_for("admin", "dify")
+@mcp.tool()
 def list_reservations_with_employee(
     email: str
 ) -> dict:
@@ -266,7 +268,7 @@ def list_reservations_with_employee(
         conn.close()
 
 # ===========================================================
-@tool_for("dify")
+@mcp.tool()
 def create_reservation_request(
     title: str,
     start_time: str,
@@ -305,7 +307,7 @@ def create_reservation_request(
         conn.close()
 
 
-@tool_for("admin", "dify")
+@mcp.tool()
 def list_reservation_requests(status: Optional[str] = None) -> dict:
     """
     予約リクエストの一覧を取得する(管理者用)。
@@ -324,7 +326,7 @@ def list_reservation_requests(status: Optional[str] = None) -> dict:
         conn.close()
 
 
-@tool_for("admin", "dify")
+@mcp.tool()
 def approve_reservation_request(request_id: int) -> dict:
     """
     予約リクエストを承認して実際の予約を作成する(管理者用)。
@@ -350,7 +352,7 @@ def approve_reservation_request(request_id: int) -> dict:
         conn.close()
 
 
-@tool_for("admin", "dify")
+@mcp.tool()
 def reject_reservation_request(request_id: int, reason: str) -> dict:
     """
     予約リクエストを却下する(管理者用)。実際の予約は作成しない。
@@ -369,6 +371,125 @@ def reject_reservation_request(request_id: int, reason: str) -> dict:
     finally:
         conn.close()
 
+
+@mcp.tool()
+def send_room_schedule_email(
+    recipient: str,
+    date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict:
+    """
+    指定した日付または期間の会議室全体の利用予定を、
+    指定した社員へメールで送信する。
+
+    メール本文はカレンダー形式の表で表示し、
+    各予定には時間と会議名のみを表示する。
+
+    Args:
+        recipient:
+            メール送信先の社員名またはメールアドレス
+
+        date:
+            特定の日付 ("YYYY-MM-DD")
+
+        start_date:
+            期間の開始日 ("YYYY-MM-DD")
+
+        end_date:
+            期間の終了日 ("YYYY-MM-DD")
+
+    Examples:
+        「明日の会議室利用予定を山田さんに送って」
+        「来週の会議室利用状況をtanaka@example.comに送って」
+
+    Returns:
+        成功:
+        {
+            "success": true,
+            ...
+        }
+
+        失敗:
+        {
+            "success": false,
+            "error": "..."
+        }
+    """
+
+    conn = _get_conn()
+
+    try:
+        return es.send_room_schedule_email(
+            conn=conn,
+            recipient=recipient,
+            date=date,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def send_employee_schedule_email(
+    employee: str,
+    date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict:
+    """
+    指定した社員が参加する会議予定だけを検索し、
+    その社員本人へメールで送信する。
+
+    メール本文は表形式で表示し、
+    日付・時間・会議名を表示する。
+
+    Args:
+        employee:
+            対象社員の社員名またはメールアドレス
+
+        date:
+            特定の日付 ("YYYY-MM-DD")
+
+        start_date:
+            期間の開始日 ("YYYY-MM-DD")
+
+        end_date:
+            期間の終了日 ("YYYY-MM-DD")
+
+    Examples:
+        「山田さんの明日の会議予定をメールで送って」
+        「田中さんの来週の予定を本人に送って」
+
+    Returns:
+        成功:
+        {
+            "success": true,
+            ...
+        }
+
+        失敗:
+        {
+            "success": false,
+            "error": "..."
+        }
+    """
+
+    conn = _get_conn()
+
+    try:
+        return es.send_employee_schedule_email(
+            conn=conn,
+            employee=employee,
+            date=date,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     if MODE == "admin":
