@@ -42,7 +42,6 @@ def get_reservation_data(row: sqlite3.Row) -> dict:
     data = row_to_dict(row)
     
     # if "participants" in data:
-    # 지금은 무조건 participants 컬럼이 존재하므로, 아래 코드 실행
     data["participants"] = parse_text_to_list(data["participants"])
         
     return data
@@ -64,6 +63,60 @@ def resolve_date_range(date, start_date, end_date):
     range_start = start_date if start_date is not None else end_date
     range_end = end_date if end_date is not None else start_date
     return range_start, range_end
+
+
+def validate_date_range(
+    date: str = None,
+    start_date: str = None,
+    end_date: str = None,
+) -> dict:
+    """
+    단일 날짜 또는 기간 입력을 검증하고
+    최종 조회 시작일/종료일을 반환한다.
+    """
+
+    range_start, range_end = resolve_date_range(
+        date,
+        start_date,
+        end_date,
+    )
+
+    # 날짜 조건 자체가 없는 경우
+    if range_start is None and range_end is None:
+        return {
+            "success": True,
+            "start_date": None,
+            "end_date": None,
+        }
+
+    normalized_start = parse_date_only(range_start)
+    normalized_end = parse_date_only(range_end)
+
+    if normalized_start is None or normalized_end is None:
+        return {
+            "success": False,
+            "error": "invalid_date_format",
+            "expected": "YYYY-MM-DD",
+            "given": {
+                "date": date,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+        }
+
+    if normalized_start > normalized_end:
+        return {
+            "success": False,
+            "error": "invalid_date_range",
+            "start_date": normalized_start,
+            "end_date": normalized_end,
+        }
+
+    return {
+        "success": True,
+        "start_date": normalized_start,
+        "end_date": normalized_end,
+    }
 
 
 def parse_datetime(value: str):
@@ -102,6 +155,20 @@ def parse_hhmm(value: str):
         return None
     
 # ====================================================================
+def validate_category(category: str) -> dict:
+    # 지정한 4개의 카테고리 이외의 것을 받으면 에러처리
+    if category not in VALID_CATEGORIES:
+        return {
+            "success": False,
+            "error": "invalid_category",
+            "valid_categories": VALID_CATEGORIES,
+            "given": category,
+        }
+
+    return {
+        "success": True,
+    }
+
 
 def validate_reservation_input(
     title: str,
@@ -127,15 +194,11 @@ def validate_reservation_input(
             "error": "missing_fields",
             "missing_fields": missing,
         }
+    
+    category_validation = validate_category(category)
 
-    # 지정한 4개의 카테고리 이외의 것을 받으면 에러처리
-    if category not in VALID_CATEGORIES:
-        return {
-            "success": False,
-            "error": "invalid_category",
-            "valid_categories": VALID_CATEGORIES,
-            "given": category,
-        }
+    if not category_validation["success"]:
+        return category_validation
 
     norm_start = parse_datetime(start_time)
     norm_end = parse_datetime(end_time)

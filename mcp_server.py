@@ -87,7 +87,7 @@ def _init_db_if_needed():
 
 
 _init_db_if_needed()
-reminder_scheduler = start_scheduler()
+scheduler = start_scheduler()
 mcp = FastMCP("meeting-room-server")
 
 
@@ -492,7 +492,7 @@ def send_employee_schedule_email(
         conn.close()
 
 if __name__ == "__main__":
-    if MODE == "admin":
-        mcp.run(transport="stdio")
-    else:
-        mcp.run(transport="sse", port=PORT)
+    mcp.run(
+        transport="sse",
+        port=PORT,
+    )

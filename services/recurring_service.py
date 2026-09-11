@@ -4,19 +4,13 @@ from datetime import datetime, timedelta
 from utils.server_setting import VALID_CATEGORIES
 from utils.format_tools import parse_date_only, parse_hhmm
 from services.crud_service import create_reservation_integrated
-from services.email_service import send_email
 from utils.database import get_connection
 
 def create_recurring_reservation(
     conn,
-    title: str,
-    start_date: str,
-    weekday: int,
-    start_time: str,
-    end_time: str,
-    category: str,
-    participant_names: list,
-    description: str = None,
+    title: str, start_date: str, weekday: int,
+    start_time: str, end_time: str, category: str,
+    participant_names: list, description: str = None,
 ) -> dict:
 
     if not title:
@@ -24,13 +18,39 @@ def create_recurring_reservation(
             "success": False,
             "error": "title_required",
         }
-
-    if not participant_names:
+        
+    normalized_date = parse_date_only(start_date)
+    if normalized_date is None:
         return {
             "success": False,
-            "error": "participants_required",
+            "error": "invalid_start_date",
+            "given": start_date,
         }
 
+    if not isinstance(weekday, int) or weekday not in range(7):
+        return {
+            "success": False,
+            "error": "invalid_weekday",
+            "expected": "0-6",
+            "given": weekday,
+        }
+        
+    start_minutes = parse_hhmm(start_time)
+    end_minutes = parse_hhmm(end_time)
+    if start_minutes is None or end_minutes is None:
+        return {
+            "success": False,
+            "error": "invalid_time_format",
+            "expected": "HH:MM",
+        }
+
+    # LLM이 체크해주니까 필요 없어보이지만, 혹시 모르니 남겨둠
+    if start_minutes >= end_minutes:
+        return {
+            "success": False,
+            "error": "end_before_start",
+        }
+        
     if category not in VALID_CATEGORIES:
         return {
             "success": False,
@@ -39,29 +59,10 @@ def create_recurring_reservation(
             "given": category,
         }
 
-    normalized_date = parse_date_only(start_date)
-
-    if normalized_date is None:
+    if not participant_names:
         return {
             "success": False,
-            "error": "invalid_start_date",
-            "given": start_date,
-        }
-
-    start_minutes = parse_hhmm(start_time)
-    end_minutes = parse_hhmm(end_time)
-
-    if start_minutes is None or end_minutes is None:
-        return {
-            "success": False,
-            "error": "invalid_time_format",
-            "expected": "HH:MM",
-        }
-
-    if start_minutes >= end_minutes:
-        return {
-            "success": False,
-            "error": "end_before_start",
+            "error": "participants_required",
         }
 
     participant_names_json = json.dumps(
@@ -73,24 +74,16 @@ def create_recurring_reservation(
         """
         INSERT INTO recurring_reservations
             (
-                title,
-                start_date,
-                start_time,
-                end_time,
-                category,
-                description,
-                participant_names
+                title, start_date, weekday,
+                start_time, end_time, category,
+                participant_names, description
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            title,
-            normalized_date,
-            start_time,
-            end_time,
-            category,
-            description,
-            participant_names_json,
+            title, normalized_date, weekday,
+            start_time, end_time, category,
+            participant_names_json, description
         ),
     )
 
@@ -99,11 +92,7 @@ def create_recurring_reservation(
     recurring_id = cur.lastrowid
 
     row = conn.execute(
-        """
-        SELECT *
-        FROM recurring_reservations
-        WHERE id = ?
-        """,
+        "SELECT * FROM recurring_reservations WHERE id = ?",
         (recurring_id,),
     ).fetchone()
 
@@ -113,9 +102,6 @@ def create_recurring_reservation(
     }
     
     
-from datetime import datetime, timedelta
-
-
 def generate_weekly_dates(
     start_date: str,
     weekday: int,
